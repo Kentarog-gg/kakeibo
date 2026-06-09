@@ -130,7 +130,7 @@ function periodInfo(view, cs) {
   return { start, end, days, keys: days.map((x) => x.key) };
 }
 
-const DEFAULT_META = { banks: [], cards: [], cardFix: {}, income: {}, alloc: {}, budget: {}, carryOn: true, savings: [], cycleStart: 1, presets: [], fixed: [], fixedApplied: {}, lastPay: "cash" };
+const DEFAULT_META = { banks: [], cards: [], cardFix: {}, income: {}, alloc: {}, budget: {}, carryOn: true, savings: [], cycleStart: 1, presets: [], fixed: [], fixedApplied: {}, lastPay: "cash", savePlan: {} };
 function normalizeMeta(p) {
   p = p || {};
   const m = {
@@ -146,6 +146,7 @@ function normalizeMeta(p) {
     fixed: Array.isArray(p.fixed) ? p.fixed : [],
     fixedApplied: p.fixedApplied && typeof p.fixedApplied === "object" ? { ...p.fixedApplied } : {},
     lastPay: typeof p.lastPay === "string" && p.lastPay ? p.lastPay : "cash",
+    savePlan: p.savePlan && typeof p.savePlan === "object" ? { ...p.savePlan } : {},
   };
   if (m.banks.length === 0) m.banks = [{ id: "bank1", name: "口座", amount: p.bank !== undefined && p.bank !== null ? String(p.bank) : "" }];
   if (m.cards.length === 0) m.cards = [{ id: "card1", name: "カード" }];
@@ -163,16 +164,23 @@ function actualSpentOf(data, view, cs) {
   p.keys.forEach((k) => { const v = data && data[k]; if (v) a += actualOf(v); });
   return a;
 }
-// previous-period leftover (income + its own carryover − allocations − ACTUAL spending), chained
+// previous-period leftover (income + its own carryover − allocations − savings contributions − ACTUAL spending), chained
 function leftoverOf(meta, data, cs, view, depth) {
   depth = depth || 0;
   if (depth > 24) return 0;
   const mk = mkey(view);
   const inc = ((meta.income && meta.income[mk]) || []).reduce((s, i) => s + numOf(i.amount), 0);
   const alloc = ((meta.alloc && meta.alloc[mk]) || []).reduce((s, i) => s + numOf(i.amount), 0);
+  const save = Object.values((meta.savePlan && meta.savePlan[mk]) || {}).reduce((s, v) => s + numOf(v), 0);
   const spent = actualSpentOf(data, view, cs);
   const carry = meta.carryOn !== false ? leftoverOf(meta, data, cs, prevView(view), depth + 1) : 0;
-  return inc + carry - alloc - spent;
+  return inc + carry - alloc - save - spent;
+}
+// total contributions to one savings envelope across all months
+function contribOf(meta, envId) {
+  let t = 0;
+  Object.values(meta.savePlan || {}).forEach((m) => { if (m && m[envId] !== undefined) t += numOf(m[envId]); });
+  return t;
 }
 
 function BudgetCalendar() {
@@ -348,7 +356,7 @@ function BudgetCalendar() {
         {tab === "cal" && (
           <>
             <BudgetRemaining totals={totals} period={period} today={today} />
-            <button onClick={() => setQuick(true)} style={{ width: "100%", marginBottom: 14, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, boxShadow: "0 2px 6px rgba(200,85,61,.25)" }}>＋ 今日に追加</button>
+            <button onClick={() => setQuick(true)} style={{ width: "100%", marginBottom: 14, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, boxShadow: "0 2px 6px rgba(200,85,61,.25)" }}>＋ すぐ追加(今日・複数日まとめて)</button>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 4 }}>
               {WEEK.map((w, i) => (<div key={w} style={{ textAlign: "center", fontSize: 11, padding: "6px 0", fontWeight: 600, color: i === 0 ? C.seal : i === 6 ? C.budgetInk : C.muted }}>{w}</div>))}
             </div>
@@ -363,7 +371,7 @@ function BudgetCalendar() {
       </div>
 
       {sel && (<Editor key={sel} dateKey={sel} entry={data[sel]} cards={meta.cards || []} recent={recentItems} lastPay={meta.lastPay || "cash"} onSave={saveDay} onClear={() => clearDay(sel)} onClose={() => setSel(null)} hasData={hasEntry(data[sel])} />)}
-      {quick && (<QuickAdd dateKey={todayKey} cards={meta.cards || []} recent={recentItems} presets={meta.presets || []} lastPay={meta.lastPay || "cash"} onAdd={(items, metaPatch) => addItemsToDay(todayKey, items, metaPatch)} onPresets={(list) => persistMeta({ ...meta, presets: list })} onClose={() => setQuick(false)} />)}
+      {quick && (<QuickAdd dateKey={todayKey} cards={meta.cards || []} recent={recentItems} presets={meta.presets || []} lastPay={meta.lastPay || "cash"} onAdd={(dk, items) => addItemsToDay(dk, items)} onPresets={(list) => persistMeta({ ...meta, presets: list })} onClose={() => setQuick(false)} />)}
       {showExport && <ExportSheet csv={buildCSV()} backup={buildBackup()} onRestore={restoreBackup} onClose={() => setShowExport(false)} />}
     </div>
   );
@@ -541,6 +549,7 @@ function Editor({ dateKey, entry, cards, prefill, recent, lastPay, onSave, onCle
 
 function QuickAdd({ dateKey, cards, recent, presets, lastPay, onAdd, onPresets, onClose }) {
   const payOptions = [{ id: "cash", label: "現金", dot: CASH_COLOR }, ...cards.map((c) => ({ id: c.id, label: c.name || "カード", dot: CARD_COLOR }))];
+  const [date, setDate] = useState(dateKey);
   const [amount, setAmount] = useState("");
   const [cat, setCat] = useState("other");
   const [pay, setPay] = useState(resolvePay(lastPay, cards));
@@ -549,7 +558,8 @@ function QuickAdd({ dateKey, cards, recent, presets, lastPay, onAdd, onPresets, 
   const chip = { border: `1px solid ${C.line}`, background: C.surface, borderRadius: 999, padding: "8px 12px", fontSize: 12.5, fontWeight: 600, color: C.ink, cursor: "pointer", fontFamily: FONT, display: "inline-flex", alignItems: "center", gap: 6 };
   const catLabel = (id) => (CAT_BY_ID[id] ? CAT_BY_ID[id].label : "その他");
   const payLabel = (p) => (isCardPay(p) ? cardName(resolvePay(p, cards), cards) : "現金");
-  const addOne = (it, stay) => { onAdd([it]); setCount((c) => c + 1); if (!stay) onClose(); };
+  const validDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : dateKey;
+  const addOne = (it, stay) => { onAdd(validDate, [it]); setCount((c) => c + 1); if (!stay) onClose(); };
   const saveCurrent = (stay) => { if (!(numOf(amount) > 0)) return; addOne({ cat, amount: numOf(amount), pay }, stay); setAmount(""); };
   const registerPreset = () => {
     if (!(numOf(amount) > 0)) return;
@@ -560,9 +570,14 @@ function QuickAdd({ dateKey, cards, recent, presets, lastPay, onAdd, onPresets, 
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, maxHeight: "88vh", overflowY: "auto", background: C.paper, borderRadius: "22px 22px 0 0", padding: "10px 18px 26px", boxShadow: "0 -8px 30px rgba(44,39,31,.18)" }}>
         <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontSize: 17, fontWeight: 700 }}>今日に追加</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>すぐ追加</div>
           {count > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: C.good }}>{count}件追加済み ✓</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+          <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>追加する日</span>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ flex: 1, border: `1px solid ${C.line}`, borderRadius: 10, background: C.surface, padding: "8px 10px", fontSize: 14, fontWeight: 600, color: C.ink, fontFamily: FONT, outline: "none" }} />
+          {date !== dateKey && <button onClick={() => setDate(dateKey)} style={{ fontSize: 12, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px solid ${C.line}`, borderRadius: 9, padding: "7px 10px", cursor: "pointer", fontFamily: FONT }}>今日</button>}
         </div>
 
         {(presets || []).length > 0 || editPresets ? (
@@ -701,7 +716,7 @@ function Row({ label, value, color }) {
   return (<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0" }}><span style={{ fontSize: 13, color: C.muted }}>{label}</span><span style={{ fontSize: 16, fontWeight: 700, color, fontVariantNumeric: "tabular-nums" }}>{value}</span></div>);
 }
 
-function SavingsEditor({ items, onChange }) {
+function SavingsEditor({ items, contrib, onChange }) {
   const set = (id, patch) => onChange(items.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   const add = () => onChange([...items, { id: uid(), name: "", amount: "", target: "" }]);
   const remove = (id) => onChange(items.filter((s) => s.id !== id));
@@ -717,7 +732,8 @@ function SavingsEditor({ items, onChange }) {
   return (
     <>
       {items.map((s) => {
-        const cur = numOf(s.amount), tgt = numOf(s.target);
+        const added = (contrib && contrib[s.id]) || 0;
+        const cur = numOf(s.amount) + added, tgt = numOf(s.target);
         const ratio = tgt > 0 ? Math.min(cur / tgt, 1) : 0;
         const done = tgt > 0 && cur >= tgt;
         return (
@@ -728,11 +744,15 @@ function SavingsEditor({ items, onChange }) {
               <button onClick={() => remove(s.id)} aria-label="この貯蓄枠を削除" style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 8, border: "none", background: "transparent", color: C.faint, fontSize: 18, cursor: "pointer", lineHeight: 1 }}>×</button>
             </div>
             <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-              {moneyField("現在の貯蓄額", s.amount, (v) => set(s.id, { amount: v }))}
+              {moneyField("はじめの貯蓄額", s.amount, (v) => set(s.id, { amount: v }))}
               {moneyField("目標額(任意)", s.target, (v) => set(s.id, { target: v }))}
             </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+              <span style={{ fontSize: 11.5, color: C.muted }}>毎月の積立を含めた現在額{added > 0 ? `(積立 +${yen(added)})` : ""}</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: C.good, fontVariantNumeric: "tabular-nums" }}>{yen(cur)}</span>
+            </div>
             {tgt > 0 && (
-              <div style={{ marginTop: 10 }}>
+              <div style={{ marginTop: 8 }}>
                 <div style={{ height: 7, borderRadius: 4, background: C.lineSoft, overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${ratio * 100}%`, background: C.good, borderRadius: 4, transition: "width .3s" }} />
                 </div>
@@ -811,8 +831,9 @@ function EditList({ items, onChange, namePlaceholder }) {
   );
 }
 
-function CardsEditor({ cards, auto, fixMap, onCards, onFix }) {
+function CardsEditor({ cards, banks, auto, fixMap, onCards, onFix }) {
   const rename = (id, name) => onCards(cards.map((c) => (c.id === id ? { ...c, name } : c)));
+  const setBank = (id, bankId) => onCards(cards.map((c) => (c.id === id ? { ...c, bankId } : c)));
   const add = () => onCards([...cards, { id: uid(), name: "" }]);
   const remove = (id) => onCards(cards.filter((c) => c.id !== id));
   return (
@@ -835,6 +856,16 @@ function CardsEditor({ cards, auto, fixMap, onCards, onFix }) {
                 <span style={{ fontSize: 13, color: C.faint, marginRight: 2 }}>¥</span>
                 <input type="text" inputMode="numeric" value={fixMap[c.id] || ""} onChange={(e) => onFix(c.id, e.target.value.replace(/[^0-9]/g, ""))} placeholder="—" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 700, color: CARD_COLOR, padding: "8px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
               </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>引き落とし口座</div>
+            <div style={{ position: "relative", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper }}>
+              <select value={c.bankId || ""} onChange={(e) => setBank(c.id, e.target.value)} style={{ width: "100%", border: "none", outline: "none", background: "transparent", appearance: "none", WebkitAppearance: "none", padding: "9px 28px 9px 10px", fontSize: 13.5, fontWeight: 600, color: c.bankId ? C.ink : C.faint, fontFamily: FONT, cursor: "pointer" }}>
+                <option value="">未設定</option>
+                {(banks || []).map((b) => <option key={b.id} value={b.id}>{b.name || "口座"}</option>)}
+              </select>
+              <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
             </div>
           </div>
         </div>
@@ -866,14 +897,22 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
   const allocList = (meta.alloc && meta.alloc[mk]) || [];
   const budgetStr = (meta.budget && meta.budget[mk]) || "";
   const monthlyBudget = numOf(budgetStr);
+  const savings = meta.savings || [];
+  const savePlanMap = (meta.savePlan && meta.savePlan[mk]) || {};
+  const saveSum = savings.reduce((s, sv) => s + numOf(savePlanMap[sv.id]), 0);
   const incomeSum = incomeList.reduce((s, i) => s + numOf(i.amount), 0);
   const totalIncome = incomeSum + carryIn;
-  const totalAlloc = allocList.reduce((s, i) => s + numOf(i.amount), 0) + periodSpent;
+  const totalAlloc = allocList.reduce((s, i) => s + numOf(i.amount), 0) + saveSum + periodSpent;
   const unalloc = totalIncome - totalAlloc;
   const allocBars = [
     ...(periodSpent > 0 ? [{ id: "__spent", name: "支出(実績)", amount: periodSpent, color: C.seal }] : []),
+    ...(saveSum > 0 ? [{ id: "__save", name: "貯蓄への積立", amount: saveSum, color: C.good }] : []),
     ...allocList.filter((a) => numOf(a.amount) > 0).map((a, i) => ({ id: a.id, name: a.name, amount: numOf(a.amount), color: PALETTE[i % PALETTE.length] })),
   ];
+  // per-bank real balance: balance − usage of cards whose 引き落とし口座 is this bank
+  const cardUse = (c) => { const f = fixMap[c.id]; return f !== undefined && f !== "" ? numOf(f) : auto[c.id] || 0; };
+  const bankRows = banks.map((b) => ({ id: b.id, name: b.name || "口座", balance: numOf(b.amount), cardSum: cards.filter((c) => c.bankId === b.id).reduce((s, c) => s + cardUse(c), 0) }));
+  const unlinkedCardSum = cards.filter((c) => !c.bankId || !banks.some((b) => b.id === c.bankId)).reduce((s, c) => s + cardUse(c), 0);
 
   const setBanks = (list) => onMeta({ ...meta, banks: list });
   const setCards = (list) => onMeta({ ...meta, cards: list });
@@ -882,9 +921,9 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
   const setAlloc = (list) => onMeta({ ...meta, alloc: { ...(meta.alloc || {}), [mk]: list } });
   const setBudget = (v) => onMeta({ ...meta, budget: { ...(meta.budget || {}), [mk]: v } });
   const setCarryOn = (b) => onMeta({ ...meta, carryOn: b });
-  const savings = meta.savings || [];
-  const totalSaved = savings.reduce((s, x) => s + numOf(x.amount), 0);
+  const totalSaved = savings.reduce((s, x) => s + numOf(x.amount) + contribOf(meta, x.id), 0);
   const setSavings = (list) => onMeta({ ...meta, savings: list });
+  const setSavePlan = (envId, v) => onMeta({ ...meta, savePlan: { ...(meta.savePlan || {}), [mk]: { ...savePlanMap, [envId]: v } } });
   const setCycle = (n) => onMeta({ ...meta, cycleStart: n });
 
   return (
@@ -910,7 +949,7 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
       </div>
 
       <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>クレジットカード</div>
-      <CardsEditor cards={cards} auto={auto} fixMap={fixMap} onCards={setCards} onFix={setFix} />
+      <CardsEditor cards={cards} banks={banks} auto={auto} fixMap={fixMap} onCards={setCards} onFix={setFix} />
 
       <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 16, marginBottom: 12 }}>
         <Row label="口座合計" value={yen(totalBank)} color={C.ink} />
@@ -919,6 +958,18 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
           <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>実質残高</div><div style={{ fontSize: 10.5, color: C.faint }}>カード引き落とし後の目安</div></div>
           <span style={{ fontSize: 22, fontWeight: 700, color: negative ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{yen(real)}</span>
         </div>
+        {(bankRows.some((b) => b.cardSum > 0) || (unlinkedCardSum > 0 && bankRows.length > 1)) && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.line}` }}>
+            <div style={{ fontSize: 11, color: C.muted, fontWeight: 600, marginBottom: 6 }}>口座別(引き落とし後の目安)</div>
+            {bankRows.map((b) => (
+              <div key={b.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
+                <span style={{ color: C.muted }}>{b.name}{b.cardSum > 0 ? <span style={{ color: CARD_COLOR }}>(カード −{yen(b.cardSum)})</span> : null}</span>
+                <span style={{ fontWeight: 700, color: b.balance - b.cardSum < 0 ? C.over : C.ink, fontVariantNumeric: "tabular-nums" }}>{yen(b.balance - b.cardSum)}</span>
+              </div>
+            ))}
+            {unlinkedCardSum > 0 && <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>※引き落とし口座が未設定のカード利用 {yen(unlinkedCardSum)} は合計のみに反映</div>}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 10, marginBottom: 28 }}>
@@ -932,10 +983,10 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
         </div>
       </div>
 
-      <SectionTitle note="先月の未配分を繰り越し、「支出予算」はカレンダーの予算に反映されます。">収入と配分</SectionTitle>
+      <SectionTitle note="まず収入の使いみち(資金使途)を決めて、残りから支出予算を立てる流れです。">収入と資金使途</SectionTitle>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>収入</span>
+        <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>① 収入</span>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.muted, cursor: "pointer" }}>
           <input type="checkbox" checked={carryOn} onChange={(e) => setCarryOn(e.target.checked)} style={{ accentColor: C.seal }} />
           前月繰越を含める
@@ -953,14 +1004,25 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
         <span style={{ fontSize: 18, fontWeight: 700, color: C.good, fontVariantNumeric: "tabular-nums" }}>{yen(totalIncome)}</span>
       </div>
 
-      <label style={{ display: "block", marginBottom: 6 }}>
-        <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>支出予算</span>
-        <MoneyInput value={budgetStr} onChange={setBudget} color={C.seal} big />
-      </label>
-      <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 24, lineHeight: 1.5 }}>ここに入れた予算は、カレンダーの「今月の予算残高」に反映されます。配分の一部として扱われます。</div>
+      <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>② 資金使途(固定の支払い・とり分けなど)</div>
+      <EditList items={allocList} onChange={setAlloc} namePlaceholder="例: 家賃・仕送り" />
 
-      <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>その他の配分(貯金など)</div>
-      <EditList items={allocList} onChange={setAlloc} namePlaceholder="例: 貯金" />
+      {savings.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>③ 貯蓄枠への今月の積立</div>
+          {savings.map((sv) => (
+            <div key={sv.id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: C.ink, display: "flex", alignItems: "center", gap: 7 }}><span style={{ width: 9, height: 9, borderRadius: 3, background: C.good, flexShrink: 0 }} />{sv.name || "(無名の貯蓄枠)"}</span>
+              <div style={{ display: "flex", alignItems: "center", width: 120, border: `1px solid ${C.line}`, borderRadius: 11, background: C.surface, padding: "0 10px" }}>
+                <span style={{ fontSize: 14, color: C.faint, marginRight: 2 }}>¥</span>
+                <input type="text" inputMode="numeric" value={savePlanMap[sv.id] || ""} onChange={(e) => setSavePlan(sv.id, e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 16, fontWeight: 700, color: C.good, padding: "11px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
+              </div>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>積立は資金使途に含まれ、下の貯蓄枠の残高に自動で加算されます。</div>
+        </div>
+      )}
+
       {allocBars.length > 0 && (
         <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", marginTop: 14, background: C.lineSoft }}>
           {allocBars.map((a) => (<div key={a.id} style={{ width: `${(a.amount / Math.max(totalIncome, totalAlloc, 1)) * 100}%`, background: a.color }} />))}
@@ -973,20 +1035,26 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
       )}
       <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 12, background: C.surface, border: `1px solid ${C.line}` }}>
         <Row label="収入合計" value={yen(totalIncome)} color={C.ink} />
-        <Row label="配分合計(予算含む)" value={yen(totalAlloc)} color={C.ink} />
+        <Row label="資金使途+積立+支出(実績)" value={yen(totalAlloc)} color={C.ink} />
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>未配分</div><div style={{ fontSize: 10.5, color: C.faint }}>{unalloc < 0 ? "配分しすぎです" : "翌月へ繰り越されます"}</div></div>
+          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>残り(未配分)</div><div style={{ fontSize: 10.5, color: C.faint }}>{unalloc < 0 ? "使いみちが収入を超えています" : "翌月へ繰り越されます"}</div></div>
           <span style={{ fontSize: 22, fontWeight: 700, color: unalloc < 0 ? C.over : unalloc === 0 && totalIncome > 0 ? C.good : C.budgetInk, fontVariantNumeric: "tabular-nums" }}>{yen(unalloc)}</span>
         </div>
       </div>
+
+      <label style={{ display: "block", marginTop: 24, marginBottom: 6 }}>
+        <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>④ 支出予算(残りから決める)</span>
+        <MoneyInput value={budgetStr} onChange={setBudget} color={C.seal} big />
+      </label>
+      <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 4, lineHeight: 1.5 }}>{unalloc > 0 ? `残り${yen(unalloc + periodSpent)}(支出前ベース)を目安に、今月使う分の予算を決めましょう。` : "上の残りを目安に予算を決めましょう。"}カレンダーの「今月の予算残高」に反映されます。</div>
 
       <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
       <SectionTitle note="家賃やサブスクなど毎月決まった支出を登録すると、毎月その日に自動でカレンダーへ記録されます。">固定費(毎月自動で記録)</SectionTitle>
       <FixedEditor items={meta.fixed || []} cards={cards} onChange={(list) => onMeta({ ...meta, fixed: list })} />
 
       <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
-      <SectionTitle note="用途ごとに貯める枠です。収入・支出・予算の集計には含まれません。">用途別の貯蓄枠</SectionTitle>
-      <SavingsEditor items={savings} onChange={setSavings} />
+      <SectionTitle note="用途ごとに貯める枠です。上の「③積立」で入れた額が自動で加算されます。">用途別の貯蓄枠</SectionTitle>
+      <SavingsEditor items={savings} contrib={Object.fromEntries(savings.map((sv) => [sv.id, contribOf(meta, sv.id)]))} onChange={setSavings} />
       {savings.length > 0 && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, padding: "10px 14px", background: C.goodSoft, borderRadius: 12 }}>
           <span style={{ fontSize: 13, fontWeight: 600, color: C.good }}>貯蓄枠の合計</span>
