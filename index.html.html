@@ -130,7 +130,7 @@ function periodInfo(view, cs) {
   return { start, end, days, keys: days.map((x) => x.key) };
 }
 
-const DEFAULT_META = { banks: [], cards: [], cardFix: {}, income: {}, alloc: {}, budget: {}, carryOn: true, savings: [], cycleStart: 1 };
+const DEFAULT_META = { banks: [], cards: [], cardFix: {}, income: {}, alloc: {}, budget: {}, carryOn: true, savings: [], cycleStart: 1, presets: [], fixed: [], fixedApplied: {}, lastPay: "cash" };
 function normalizeMeta(p) {
   p = p || {};
   const m = {
@@ -142,6 +142,10 @@ function normalizeMeta(p) {
     carryOn: p.carryOn !== undefined ? !!p.carryOn : true,
     savings: Array.isArray(p.savings) ? p.savings : [],
     cycleStart: p.cycleStart >= 1 && p.cycleStart <= 28 ? p.cycleStart : 1,
+    presets: Array.isArray(p.presets) ? p.presets : [],
+    fixed: Array.isArray(p.fixed) ? p.fixed : [],
+    fixedApplied: p.fixedApplied && typeof p.fixedApplied === "object" ? { ...p.fixedApplied } : {},
+    lastPay: typeof p.lastPay === "string" && p.lastPay ? p.lastPay : "cash",
   };
   if (m.banks.length === 0) m.banks = [{ id: "bank1", name: "口座", amount: p.bank !== undefined && p.bank !== null ? String(p.bank) : "" }];
   if (m.cards.length === 0) m.cards = [{ id: "card1", name: "カード" }];
@@ -152,15 +156,23 @@ function normalizeMeta(p) {
 }
 
 const prevView = (v) => { let m = v.m - 1, y = v.y; if (m < 0) { m = 11; y--; } return { y, m }; };
-// previous-month leftover (income + its own carryover − allocations − budget), chained
-function leftoverOf(meta, view, depth) {
+// actual spending within a period (respects cycle start day)
+function actualSpentOf(data, view, cs) {
+  const p = periodInfo(view, cs);
+  let a = 0;
+  p.keys.forEach((k) => { const v = data && data[k]; if (v) a += actualOf(v); });
+  return a;
+}
+// previous-period leftover (income + its own carryover − allocations − ACTUAL spending), chained
+function leftoverOf(meta, data, cs, view, depth) {
   depth = depth || 0;
   if (depth > 24) return 0;
   const mk = mkey(view);
   const inc = ((meta.income && meta.income[mk]) || []).reduce((s, i) => s + numOf(i.amount), 0);
-  const alloc = ((meta.alloc && meta.alloc[mk]) || []).reduce((s, i) => s + numOf(i.amount), 0) + numOf((meta.budget && meta.budget[mk]) || 0);
-  const carry = meta.carryOn !== false ? leftoverOf(meta, prevView(view), depth + 1) : 0;
-  return inc + carry - alloc;
+  const alloc = ((meta.alloc && meta.alloc[mk]) || []).reduce((s, i) => s + numOf(i.amount), 0);
+  const spent = actualSpentOf(data, view, cs);
+  const carry = meta.carryOn !== false ? leftoverOf(meta, data, cs, prevView(view), depth + 1) : 0;
+  return inc + carry - alloc - spent;
 }
 
 function BudgetCalendar() {
@@ -211,13 +223,66 @@ function BudgetCalendar() {
 
   const isToday = (dd) => dd.y === today.getFullYear() && dd.m === today.getMonth() && dd.d === today.getDate();
 
-  const saveDay = (dateKey, budget, items) => {
+  const saveDay = (dateKey, budgetCash, budgetCard, items) => {
     const next = { ...data };
     const clean = items.map((it) => ({ cat: it.cat || "other", amount: numOf(it.amount), pay: it.pay === "cash" ? "cash" : it.pay })).filter((it) => it.amount > 0);
-    if ((budget || 0) <= 0 && clean.length === 0) delete next[dateKey];
-    else next[dateKey] = { budget: budget || 0, items: clean };
+    const bc = budgetCash || 0, bd = budgetCard || 0, bt = bc + bd;
+    if (bt <= 0 && clean.length === 0) delete next[dateKey];
+    else next[dateKey] = { budget: bt, budgetCash: bc, budgetCard: bd, items: clean };
     persist(next); setSel(null);
+    if (clean.length) persistMeta({ ...meta, lastPay: clean[clean.length - 1].pay });
   };
+
+  // append items to a day without touching its budgets
+  const addItemsToDay = (dateKey, newItems, metaPatch) => {
+    const clean = newItems.map((it) => ({ cat: it.cat || "other", amount: numOf(it.amount), pay: it.pay === "cash" ? "cash" : it.pay })).filter((it) => it.amount > 0);
+    if (!clean.length) return;
+    const next = { ...data };
+    const cur = next[dateKey] || { budget: 0, items: [] };
+    next[dateKey] = { ...cur, items: [...(cur.items || []), ...clean] };
+    persist(next);
+    persistMeta({ ...(metaPatch || meta), lastPay: clean[clean.length - 1].pay });
+  };
+
+  const todayKey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
+  const [quick, setQuick] = useState(false);
+
+  // recent items (latest first, deduped by cat+amount+pay, max 6)
+  const recentItems = useMemo(() => {
+    const keys = Object.keys(data).sort().reverse();
+    const out = []; const seen = {};
+    for (const k of keys) {
+      const e = data[k]; if (!e || !Array.isArray(e.items)) continue;
+      for (let i = e.items.length - 1; i >= 0; i--) {
+        const it = e.items[i]; if (!it || !(it.amount > 0)) continue;
+        const sig = (it.cat || "other") + "|" + it.amount + "|" + (it.pay || "cash");
+        if (seen[sig]) continue; seen[sig] = 1;
+        out.push({ cat: it.cat || "other", amount: it.amount, pay: it.pay || "cash" });
+        if (out.length >= 6) return out;
+      }
+    }
+    return out;
+  }, [data]);
+
+  // fixed costs: auto-record once per calendar month when their day has arrived
+  useEffect(() => {
+    if (!loaded) return;
+    const fixed = meta.fixed || [];
+    if (!fixed.length) return;
+    const y = today.getFullYear(), m = today.getMonth();
+    const mk = `${y}-${String(m + 1).padStart(2, "0")}`;
+    const applied = (meta.fixedApplied && meta.fixedApplied[mk]) || [];
+    const due = fixed.filter((f) => f && numOf(f.amount) > 0 && !applied.includes(f.id) && today.getDate() >= Math.min(Math.max(1, f.day || 1), 28));
+    if (!due.length) return;
+    const next = { ...data };
+    due.forEach((f) => {
+      const dk = keyOf(y, m, Math.min(Math.max(1, f.day || 1), 28));
+      const cur = next[dk] || { budget: 0, items: [] };
+      next[dk] = { ...cur, items: [...(cur.items || []), { cat: CAT_BY_ID[f.cat] ? f.cat : "other", amount: numOf(f.amount), pay: f.pay || "cash" }] };
+    });
+    persist(next);
+    persistMeta({ ...meta, fixedApplied: { ...(meta.fixedApplied || {}), [mk]: [...applied, ...due.map((f) => f.id)] } });
+  }, [loaded, meta.fixed]);
   const clearDay = (dateKey) => { const next = { ...data }; delete next[dateKey]; persist(next); setSel(null); };
   const shiftMonth = (dir) => setView((v) => { let m = v.m + dir, y = v.y; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } return { y, m }; });
 
@@ -282,7 +347,8 @@ function BudgetCalendar() {
 
         {tab === "cal" && (
           <>
-            <BudgetRemaining totals={totals} />
+            <BudgetRemaining totals={totals} period={period} today={today} />
+            <button onClick={() => setQuick(true)} style={{ width: "100%", marginBottom: 14, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, boxShadow: "0 2px 6px rgba(200,85,61,.25)" }}>＋ 今日に追加</button>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 4 }}>
               {WEEK.map((w, i) => (<div key={w} style={{ textAlign: "center", fontSize: 11, padding: "6px 0", fontWeight: 600, color: i === 0 ? C.seal : i === 6 ? C.budgetInk : C.muted }}>{w}</div>))}
             </div>
@@ -296,7 +362,8 @@ function BudgetCalendar() {
         {tab === "funds" && <Funds data={data} view={view} meta={meta} onMeta={persistMeta} periodKeys={period.keys} />}
       </div>
 
-      {sel && (<Editor key={sel} dateKey={sel} entry={data[sel]} cards={meta.cards || []} onSave={saveDay} onClear={() => clearDay(sel)} onClose={() => setSel(null)} hasData={hasEntry(data[sel])} />)}
+      {sel && (<Editor key={sel} dateKey={sel} entry={data[sel]} cards={meta.cards || []} recent={recentItems} lastPay={meta.lastPay || "cash"} onSave={saveDay} onClear={() => clearDay(sel)} onClose={() => setSel(null)} hasData={hasEntry(data[sel])} />)}
+      {quick && (<QuickAdd dateKey={todayKey} cards={meta.cards || []} recent={recentItems} presets={meta.presets || []} lastPay={meta.lastPay || "cash"} onAdd={(items, metaPatch) => addItemsToDay(todayKey, items, metaPatch)} onPresets={(list) => persistMeta({ ...meta, presets: list })} onClose={() => setQuick(false)} />)}
       {showExport && <ExportSheet csv={buildCSV()} backup={buildBackup()} onRestore={restoreBackup} onClose={() => setShowExport(false)} />}
     </div>
   );
@@ -322,13 +389,25 @@ function Stat({ label, value, color }) {
   return (<div style={{ flex: 1 }}><div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>{label}</div><div style={{ fontSize: 17, fontWeight: 700, color, fontVariantNumeric: "tabular-nums" }}>{value}</div></div>);
 }
 
-function BudgetRemaining({ totals }) {
+function BudgetRemaining({ totals, period, today }) {
   if (totals.b <= 0) {
     return (<div style={{ background: C.surface, border: `1px dashed ${C.line}`, borderRadius: 14, padding: "13px 16px", marginBottom: 14, fontSize: 12.5, color: C.muted, textAlign: "center" }}>日付をタップして予算を入れると、今月の予算残高がここに出ます</div>);
   }
   const spent = totals.a, budget = totals.b, remaining = budget - spent;
   const over = remaining < 0;
   const ratio = Math.min(spent / budget, 1);
+  // pace forecast: only while we're inside the displayed period
+  let forecast = null;
+  if (period && today >= period.start && today <= period.end && spent > 0) {
+    const dayMs = 86400000;
+    const elapsed = Math.floor((today - period.start) / dayMs) + 1;
+    const totalDays = period.days.length;
+    if (elapsed >= 2 && elapsed < totalDays) {
+      const projected = Math.round((spent / elapsed) * totalDays);
+      const gap = projected - budget;
+      forecast = { projected, gap };
+    }
+  }
   return (
     <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14, padding: "14px 16px", marginBottom: 14, boxShadow: "0 1px 2px rgba(44,39,31,.04)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 10 }}>
@@ -342,6 +421,11 @@ function BudgetRemaining({ totals }) {
         <div style={{ height: "100%", width: `${ratio * 100}%`, background: over ? C.over : C.good, borderRadius: 4, transition: "width .3s" }} />
       </div>
       {over && <div style={{ fontSize: 11.5, color: C.over, fontWeight: 600, marginTop: 8 }}>予算を{yen(Math.abs(remaining))}オーバーしています</div>}
+      {!over && forecast && (
+        <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 8, color: forecast.gap > 0 ? C.over : C.good }}>
+          このペースだと月末は約{yen(forecast.projected)}{forecast.gap > 0 ? ` — 予算を約${yen(forecast.gap)}オーバーしそう` : ` — 約${yen(Math.abs(forecast.gap))}残りそう`}
+        </div>
+      )}
     </div>
   );
 }
@@ -370,11 +454,12 @@ function DayCell({ day, monthTag, entry, today, onClick }) {
   );
 }
 
-function Editor({ dateKey, entry, cards, prefill, onSave, onClear, onClose, hasData }) {
+function Editor({ dateKey, entry, cards, prefill, recent, lastPay, onSave, onClear, onClose, hasData }) {
   const [y, m, d] = dateKey.split("-");
   const wd = WEEK[new Date(+y, +m - 1, +d).getDay()];
   const payOptions = [{ id: "cash", label: "現金", dot: CASH_COLOR }, ...cards.map((c) => ({ id: c.id, label: c.name || "カード", dot: CARD_COLOR }))];
-  const [budget, setBudget] = useState(entry && entry.budget ? String(entry.budget) : "");
+  const [budgetCash, setBudgetCash] = useState(entry ? (entry.budgetCash !== undefined ? String(entry.budgetCash || "") : (entry.budget ? String(entry.budget) : "")) : "");
+  const [budgetCard, setBudgetCard] = useState(entry && entry.budgetCard !== undefined ? String(entry.budgetCard || "") : "");
   const [items, setItems] = useState(() => {
     let base = [];
     if (entry && Array.isArray(entry.items) && entry.items.length) base = entry.items.map((it) => ({ id: uid(), cat: it.cat || "other", amount: String(it.amount || ""), pay: resolvePay(it.pay, cards) }));
@@ -386,10 +471,13 @@ function Editor({ dateKey, entry, cards, prefill, onSave, onClear, onClose, hasD
   const total = items.reduce((s, it) => s + numOf(it.amount), 0);
   const cardTotal = items.reduce((s, it) => s + (isCardPay(it.pay) ? numOf(it.amount) : 0), 0);
   const cashTotal = total - cardTotal;
-  const diff = numOf(budget) - total, over = diff < 0;
+  const cashBudget = numOf(budgetCash), cardBudget = numOf(budgetCard), totalBudget = cashBudget + cardBudget;
+  const diff = totalBudget - total, over = diff < 0;
+  const defPay = resolvePay(lastPay || "cash", cards);
   const setItem = (id, f, v) => setItems((arr) => arr.map((it) => (it.id === id ? { ...it, [f]: v } : it)));
-  const addItem = () => setItems((arr) => [...arr, { id: uid(), cat: "food", amount: "", pay: "cash" }]);
-  const removeItem = (id) => setItems((arr) => (arr.length > 1 ? arr.filter((it) => it.id !== id) : [{ id: uid(), cat: "food", amount: "", pay: "cash" }]));
+  const addItem = () => setItems((arr) => [...arr, { id: uid(), cat: "food", amount: "", pay: defPay }]);
+  const addRecent = (r) => setItems((arr) => { const base = arr.length === 1 && !numOf(arr[0].amount) ? [] : arr; return [...base, { id: uid(), cat: r.cat, amount: String(r.amount), pay: resolvePay(r.pay, cards) }]; });
+  const removeItem = (id) => setItems((arr) => (arr.length > 1 ? arr.filter((it) => it.id !== id) : [{ id: uid(), cat: "food", amount: "", pay: defPay }]));
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
@@ -397,10 +485,29 @@ function Editor({ dateKey, entry, cards, prefill, onSave, onClear, onClose, hasD
         <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 16 }}>{+m}月{+d}日<span style={{ fontSize: 13, color: C.muted, marginLeft: 6 }}>({wd})</span></div>
         {Array.isArray(prefill) && prefill.length > 0 && (<div style={{ fontSize: 12, color: C.budgetInk, background: "#EAF0F4", borderRadius: 10, padding: "9px 12px", marginBottom: 14, lineHeight: 1.5 }}>📷 AIが読み取りました。内容を確認・修正して保存してください。</div>)}
-        <label style={{ display: "block", marginBottom: 18 }}>
-          <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>予算</span>
-          <MoneyInput value={budget} onChange={setBudget} color={C.budgetInk} big />
-        </label>
+        <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+          <label style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 12, color: CASH_COLOR, fontWeight: 600 }}>現金予算</span>
+            <MoneyInput value={budgetCash} onChange={setBudgetCash} color={CASH_COLOR} />
+          </label>
+          <label style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 12, color: CARD_COLOR, fontWeight: 600 }}>カード予算</span>
+            <MoneyInput value={budgetCard} onChange={setBudgetCard} color={CARD_COLOR} />
+          </label>
+        </div>
+        {recent && recent.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>最近の項目(タップで追加)</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {recent.map((r, i) => (
+                <button key={i} onClick={() => addRecent(r)} style={{ border: `1px solid ${C.line}`, background: C.surface, borderRadius: 999, padding: "7px 11px", fontSize: 12, fontWeight: 600, color: C.ink, cursor: "pointer", fontFamily: FONT, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 4, background: CAT_BY_ID[r.cat] ? CAT_BY_ID[r.cat].color : C.faint }} />
+                  {CAT_BY_ID[r.cat] ? CAT_BY_ID[r.cat].label : "その他"} {yen(r.amount)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 10 }}>使ったもの(カテゴリ・支払い方法)</div>
         {items.map((it) => (
           <div key={it.id} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.lineSoft}` }}>
@@ -420,13 +527,92 @@ function Editor({ dateKey, entry, cards, prefill, onSave, onClear, onClose, hasD
         <button onClick={addItem} style={{ marginTop: 2, fontSize: 13, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "10px 0", width: "100%", cursor: "pointer", fontFamily: FONT }}>＋ 項目を追加</button>
         <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 12, background: C.surface, border: `1px solid ${C.line}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><span style={{ fontSize: 13, color: C.muted }}>支出合計</span><span style={{ fontSize: 16, fontWeight: 700, color: C.ink, fontVariantNumeric: "tabular-nums" }}>{yen(total)}</span></div>
-          <div style={{ display: "flex", gap: 8, marginTop: 8, fontSize: 12 }}><span style={{ flex: 1, color: CASH_COLOR, fontWeight: 600 }}>現金 {yen(cashTotal)}</span><span style={{ flex: 1, color: CARD_COLOR, fontWeight: 600 }}>カード {yen(cardTotal)}</span></div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.line}` }}><span style={{ fontSize: 13, fontWeight: 600, color: over ? C.over : C.good }}>差額</span><span style={{ fontSize: 18, fontWeight: 700, color: over ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{over ? "−" : "+"}{yen(Math.abs(diff))}</span></div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, fontSize: 12 }}><span style={{ flex: 1, color: CASH_COLOR, fontWeight: 600 }}>現金 {yen(cashTotal)} / 予算 {yen(cashBudget)}</span><span style={{ flex: 1, color: CARD_COLOR, fontWeight: 600 }}>カード {yen(cardTotal)} / 予算 {yen(cardBudget)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.line}` }}><span style={{ fontSize: 13, fontWeight: 600, color: over ? C.over : C.good }}>差額(予算 {yen(totalBudget)})</span><span style={{ fontSize: 18, fontWeight: 700, color: over ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{over ? "−" : "+"}{yen(Math.abs(diff))}</span></div>
         </div>
         <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
           {hasData && (<button onClick={onClear} style={{ padding: "13px 16px", borderRadius: 13, border: `1px solid ${C.line}`, background: "transparent", color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>この日を削除</button>)}
-          <button onClick={() => onSave(dateKey, numOf(budget), items)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>保存</button>
+          <button onClick={() => onSave(dateKey, cashBudget, cardBudget, items)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>保存</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickAdd({ dateKey, cards, recent, presets, lastPay, onAdd, onPresets, onClose }) {
+  const payOptions = [{ id: "cash", label: "現金", dot: CASH_COLOR }, ...cards.map((c) => ({ id: c.id, label: c.name || "カード", dot: CARD_COLOR }))];
+  const [amount, setAmount] = useState("");
+  const [cat, setCat] = useState("other");
+  const [pay, setPay] = useState(resolvePay(lastPay, cards));
+  const [count, setCount] = useState(0);
+  const [editPresets, setEditPresets] = useState(false);
+  const chip = { border: `1px solid ${C.line}`, background: C.surface, borderRadius: 999, padding: "8px 12px", fontSize: 12.5, fontWeight: 600, color: C.ink, cursor: "pointer", fontFamily: FONT, display: "inline-flex", alignItems: "center", gap: 6 };
+  const catLabel = (id) => (CAT_BY_ID[id] ? CAT_BY_ID[id].label : "その他");
+  const payLabel = (p) => (isCardPay(p) ? cardName(resolvePay(p, cards), cards) : "現金");
+  const addOne = (it, stay) => { onAdd([it]); setCount((c) => c + 1); if (!stay) onClose(); };
+  const saveCurrent = (stay) => { if (!(numOf(amount) > 0)) return; addOne({ cat, amount: numOf(amount), pay }, stay); setAmount(""); };
+  const registerPreset = () => {
+    if (!(numOf(amount) > 0)) return;
+    onPresets([...(presets || []), { id: uid(), cat, amount: numOf(amount), pay }]);
+  };
+  const removePreset = (id) => onPresets((presets || []).filter((p) => p.id !== id));
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, maxHeight: "88vh", overflowY: "auto", background: C.paper, borderRadius: "22px 22px 0 0", padding: "10px 18px 26px", boxShadow: "0 -8px 30px rgba(44,39,31,.18)" }}>
+        <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>今日に追加</div>
+          {count > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: C.good }}>{count}件追加済み ✓</span>}
+        </div>
+
+        {(presets || []).length > 0 || editPresets ? (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>定番(タップで追加)</span>
+              <button onClick={() => setEditPresets(!editPresets)} style={{ fontSize: 11.5, fontWeight: 600, color: C.budgetInk, background: "transparent", border: "none", cursor: "pointer", fontFamily: FONT }}>{editPresets ? "完了" : "編集"}</button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+              {(presets || []).map((p) => (
+                <button key={p.id} onClick={() => (editPresets ? removePreset(p.id) : addOne({ cat: p.cat, amount: p.amount, pay: resolvePay(p.pay, cards) }, true))} style={{ ...chip, borderColor: editPresets ? C.over : C.line }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 4, background: CAT_BY_ID[p.cat] ? CAT_BY_ID[p.cat].color : C.faint }} />
+                  {catLabel(p.cat)} {yen(p.amount)}<span style={{ color: C.faint, fontWeight: 500 }}>{payLabel(p.pay)}</span>
+                  {editPresets && <span style={{ color: C.over, fontWeight: 700 }}>×</span>}
+                </button>
+              ))}
+              {(presets || []).length === 0 && <span style={{ fontSize: 12, color: C.faint }}>まだ定番がありません。下で金額を入れて「定番に登録」を押すと作れます。</span>}
+            </div>
+          </>
+        ) : null}
+
+        {recent && recent.length > 0 && (
+          <>
+            <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>最近の項目(タップで追加)</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+              {recent.map((r, i) => (
+                <button key={i} onClick={() => addOne({ cat: r.cat, amount: r.amount, pay: resolvePay(r.pay, cards) }, true)} style={chip}>
+                  <span style={{ width: 8, height: 8, borderRadius: 4, background: CAT_BY_ID[r.cat] ? CAT_BY_ID[r.cat].color : C.faint }} />
+                  {catLabel(r.cat)} {yen(r.amount)}<span style={{ color: C.faint, fontWeight: 500 }}>{payLabel(r.pay)}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>手入力</div>
+        <div style={{ display: "flex", alignItems: "center", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 13, padding: "0 14px", marginBottom: 10 }}>
+          <span style={{ fontSize: 18, color: C.faint, marginRight: 4 }}>¥</span>
+          <input type="text" inputMode="numeric" autoFocus value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 24, fontWeight: 700, color: C.ink, padding: "13px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT, width: "100%" }} />
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <PickSelect value={cat} onChange={setCat} options={CATS.map((c) => ({ id: c.id, label: c.label, dot: c.color }))} flex />
+          <PickSelect value={pay} onChange={setPay} options={payOptions} flex />
+        </div>
+        <button onClick={registerPreset} style={{ width: "100%", marginBottom: 14, fontSize: 12.5, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "9px 0", cursor: "pointer", fontFamily: FONT }}>☆ いまの内容を定番に登録</button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => saveCurrent(true)} style={{ flex: 1, padding: "13px 0", borderRadius: 13, border: `1px solid ${C.seal}`, background: "transparent", color: C.seal, fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>保存して次へ</button>
+          <button onClick={() => saveCurrent(false)} style={{ flex: 1, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 14.5, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>保存して閉じる</button>
+        </div>
+        <button onClick={onClose} style={{ width: "100%", marginTop: 12, padding: "11px 0", borderRadius: 12, border: "none", background: "transparent", color: C.muted, fontSize: 13.5, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>閉じる</button>
       </div>
     </div>
   );
@@ -665,6 +851,7 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
   const { cash } = monthSplit(data, periodKeys);
   const auto = monthByCard(data, periodKeys, cards);
   const fixMap = (meta.cardFix && meta.cardFix[mk]) || {};
+  const cs = meta.cycleStart >= 1 && meta.cycleStart <= 28 ? meta.cycleStart : 1;
 
   const totalBank = banks.reduce((s, b) => s + numOf(b.amount), 0);
   const usedCardTotal = cards.reduce((s, c) => { const f = fixMap[c.id]; return s + (f !== undefined && f !== "" ? numOf(f) : auto[c.id] || 0); }, 0);
@@ -673,17 +860,18 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
   const negative = real < 0;
 
   const carryOn = meta.carryOn !== false;
-  const carryIn = carryOn ? leftoverOf(meta, prevView(view)) : 0;
+  const carryIn = carryOn ? leftoverOf(meta, data, cs, prevView(view)) : 0;
+  const periodSpent = periodKeys.reduce((s, k) => { const v = data[k]; return s + (v ? actualOf(v) : 0); }, 0);
   const incomeList = (meta.income && meta.income[mk]) || [];
   const allocList = (meta.alloc && meta.alloc[mk]) || [];
   const budgetStr = (meta.budget && meta.budget[mk]) || "";
   const monthlyBudget = numOf(budgetStr);
   const incomeSum = incomeList.reduce((s, i) => s + numOf(i.amount), 0);
   const totalIncome = incomeSum + carryIn;
-  const totalAlloc = allocList.reduce((s, i) => s + numOf(i.amount), 0) + monthlyBudget;
+  const totalAlloc = allocList.reduce((s, i) => s + numOf(i.amount), 0) + periodSpent;
   const unalloc = totalIncome - totalAlloc;
   const allocBars = [
-    ...(monthlyBudget > 0 ? [{ id: "__budget", name: "支出予算", amount: monthlyBudget, color: C.seal }] : []),
+    ...(periodSpent > 0 ? [{ id: "__spent", name: "支出(実績)", amount: periodSpent, color: C.seal }] : []),
     ...allocList.filter((a) => numOf(a.amount) > 0).map((a, i) => ({ id: a.id, name: a.name, amount: numOf(a.amount), color: PALETTE[i % PALETTE.length] })),
   ];
 
@@ -697,7 +885,6 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
   const savings = meta.savings || [];
   const totalSaved = savings.reduce((s, x) => s + numOf(x.amount), 0);
   const setSavings = (list) => onMeta({ ...meta, savings: list });
-  const cs = meta.cycleStart >= 1 && meta.cycleStart <= 28 ? meta.cycleStart : 1;
   const setCycle = (n) => onMeta({ ...meta, cycleStart: n });
 
   return (
@@ -794,6 +981,10 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
       </div>
 
       <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
+      <SectionTitle note="家賃やサブスクなど毎月決まった支出を登録すると、毎月その日に自動でカレンダーへ記録されます。">固定費(毎月自動で記録)</SectionTitle>
+      <FixedEditor items={meta.fixed || []} cards={cards} onChange={(list) => onMeta({ ...meta, fixed: list })} />
+
+      <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
       <SectionTitle note="用途ごとに貯める枠です。収入・支出・予算の集計には含まれません。">用途別の貯蓄枠</SectionTitle>
       <SavingsEditor items={savings} onChange={setSavings} />
       {savings.length > 0 && (
@@ -802,6 +993,39 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
           <span style={{ fontSize: 18, fontWeight: 700, color: C.good, fontVariantNumeric: "tabular-nums" }}>{yen(totalSaved)}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+function FixedEditor({ items, cards, onChange }) {
+  const payOptions = [{ id: "cash", label: "現金", dot: CASH_COLOR }, ...cards.map((c) => ({ id: c.id, label: c.name || "カード", dot: CARD_COLOR }))];
+  const add = () => onChange([...(items || []), { id: uid(), cat: "home", amount: "", pay: "cash", day: 1 }]);
+  const set = (id, f, v) => onChange(items.map((x) => (x.id === id ? { ...x, [f]: v } : x)));
+  const remove = (id) => onChange(items.filter((x) => x.id !== id));
+  return (
+    <div>
+      {(items || []).map((f) => (
+        <div key={f.id} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.lineSoft}` }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <PickSelect value={f.cat} onChange={(v) => set(f.id, "cat", v)} options={CATS.map((c) => ({ id: c.id, label: c.label, dot: c.color }))} flex />
+            <div style={{ display: "flex", alignItems: "center", width: 110, border: `1px solid ${C.line}`, borderRadius: 11, background: C.surface, padding: "0 10px" }}>
+              <span style={{ fontSize: 14, color: C.faint, marginRight: 2 }}>¥</span>
+              <input type="text" inputMode="numeric" value={f.amount} onChange={(e) => set(f.id, "amount", e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 700, color: C.ink, padding: "11px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
+            </div>
+            <button onClick={() => remove(f.id)} aria-label="この固定費を削除" style={{ width: 30, height: 30, flexShrink: 0, borderRadius: 8, border: "none", background: "transparent", color: C.faint, fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+            <div style={{ flex: 1, maxWidth: 170 }}><PickSelect value={f.pay} onChange={(v) => set(f.id, "pay", v)} options={payOptions} small /></div>
+            <span style={{ fontSize: 12, color: C.muted }}>毎月</span>
+            <div style={{ display: "flex", alignItems: "center", width: 64, border: `1px solid ${C.line}`, borderRadius: 10, background: C.surface, padding: "0 8px" }}>
+              <input type="text" inputMode="numeric" value={f.day || ""} onChange={(e) => { const n = Math.min(28, Math.max(0, numOf(e.target.value.replace(/[^0-9]/g, "")))); set(f.id, "day", n || ""); }} placeholder="1" style={{ width: "100%", border: "none", outline: "none", background: "transparent", fontSize: 14, fontWeight: 700, color: C.ink, padding: "9px 0", textAlign: "center", fontFamily: FONT }} />
+            </div>
+            <span style={{ fontSize: 12, color: C.muted }}>日</span>
+          </div>
+        </div>
+      ))}
+      <button onClick={add} style={{ fontSize: 13, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "10px 0", width: "100%", cursor: "pointer", fontFamily: FONT }}>＋ 固定費を追加</button>
+      <p style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.6 }}>※日付は1〜28。登録した日付が来ると、その月の分が自動で記録されます(同じ月に二重には記録されません)。</p>
     </div>
   );
 }
