@@ -15,26 +15,17 @@
 <script type="text/babel" data-presets="react">
 
 const { useState, useEffect, useMemo, useRef } = React;
-
-// ===== Supabase config (埋め込み。publishableキーは公開前提で安全) =====
 const SB = { url: "https://xuxubirowdouuopwjufl.supabase.co", key: "sb_publishable_SSREVvBR2vstSWk8qgSsfA_xwa09DhT" };
-
-// ===== per-URL token (Walica方式) =====
 function genToken(){ const a = new Uint8Array(16); crypto.getRandomValues(a); return Array.from(a).map(b => b.toString(16).padStart(2,"0")).join(""); }
 function readToken(){ const m = (location.hash||"").match(/g=([a-zA-Z0-9]+)/); return m ? m[1] : null; }
 let TOKEN = readToken();
-
 let cache = {};
 let saveTimer = null;
 async function cloudLoad(){
   try { const ls = localStorage.getItem("blob:" + TOKEN); if(ls) cache = JSON.parse(ls); } catch(e){}
   if(!SB.url || !TOKEN) return;
   try {
-    const r = await fetch(SB.url + "/rest/v1/rpc/get_budget", {
-      method: "POST",
-      headers: { "Content-Type":"application/json", "apikey": SB.key, "Authorization": "Bearer " + SB.key },
-      body: JSON.stringify({ p_id: TOKEN })
-    });
+    const r = await fetch(SB.url + "/rest/v1/rpc/get_budget", { method: "POST", headers: { "Content-Type":"application/json", "apikey": SB.key, "Authorization": "Bearer " + SB.key }, body: JSON.stringify({ p_id: TOKEN }) });
     if(r.ok){ const d = await r.json(); if(d && typeof d === "object") cache = d; }
   } catch(e){}
 }
@@ -43,13 +34,7 @@ function scheduleSave(){
   if(!SB.url || !TOKEN) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
-    try {
-      await fetch(SB.url + "/rest/v1/rpc/save_budget", {
-        method: "POST",
-        headers: { "Content-Type":"application/json", "apikey": SB.key, "Authorization": "Bearer " + SB.key },
-        body: JSON.stringify({ p_id: TOKEN, p_data: cache })
-      });
-    } catch(e){}
+    try { await fetch(SB.url + "/rest/v1/rpc/save_budget", { method: "POST", headers: { "Content-Type":"application/json", "apikey": SB.key, "Authorization": "Bearer " + SB.key }, body: JSON.stringify({ p_id: TOKEN, p_data: cache }) }); } catch(e){}
   }, 700);
 }
 window.storage = {
@@ -370,9 +355,9 @@ function DayCell({ day, monthTag, entry, today, onClick }) {
   }
   const hasCard = entry && Array.isArray(entry.items) && entry.items.some((it) => isCardPay(it.pay) && it.amount > 0);
   return (
-    <button onClick={onClick} style={{ position: "relative", aspectRatio: "1 / 1.15", borderRadius: 10, border: today ? `1.5px solid ${C.seal}` : `1px solid ${C.lineSoft}`, background: C.surface, padding: "5px 5px 4px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "stretch", overflow: "hidden", textAlign: "left" }}>
+    <button onClick={onClick} style={{ position: "relative", aspectRatio: "1 / 1.15", borderRadius: 10, border: today ? `1.5px solid ${C.seal}` : `1px solid ${C.lineSoft}`, background: today ? "rgba(200,85,61,0.08)" : C.surface, padding: "5px 5px 4px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "stretch", overflow: "hidden", textAlign: "left" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 12, fontWeight: today ? 700 : 500, color: today ? C.seal : C.ink, lineHeight: 1 }}>{monthTag ? <span style={{ fontSize: 8, color: C.budgetInk, marginRight: 2 }}>{monthTag}</span> : null}{day}</span>
+        <span style={{ display: "flex", alignItems: "center", lineHeight: 1 }}>{monthTag ? <span style={{ fontSize: 8, color: C.budgetInk, marginRight: 2 }}>{monthTag}</span> : null}{today ? <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 18, height: 18, padding: "0 4px", borderRadius: 9, background: C.seal, color: "#fff", fontSize: 11, fontWeight: 700 }}>{day}</span> : <span style={{ fontSize: 12, fontWeight: 500, color: C.ink }}>{day}</span>}</span>
         {hasCard && <span style={{ fontSize: 8, fontWeight: 700, color: CARD_COLOR, lineHeight: 1 }}>CARD</span>}
       </div>
       {has ? (
@@ -889,14 +874,9 @@ function Welcome(){
     </div>
   );
 }
-
 (async function(){
-  if(TOKEN){
-    await cloudLoad();
-    ReactDOM.createRoot(document.getElementById("root")).render(<BudgetCalendar />);
-  } else {
-    ReactDOM.createRoot(document.getElementById("root")).render(<Welcome />);
-  }
+  if(TOKEN){ await cloudLoad(); ReactDOM.createRoot(document.getElementById("root")).render(<BudgetCalendar />); }
+  else { ReactDOM.createRoot(document.getElementById("root")).render(<Welcome />); }
 })();
 
 </script>
