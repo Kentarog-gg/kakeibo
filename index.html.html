@@ -254,6 +254,44 @@ function BudgetCalendar() {
 
   const todayKey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
   const [quick, setQuick] = useState(false);
+  const [bulk, setBulk] = useState(false);
+  const [table, setTable] = useState(false);
+
+  // batch append rows ({date, cat, amount, pay}) grouped by date, one persist
+  const addItemsBatch = (rows) => {
+    const clean = rows.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && numOf(r.amount) > 0);
+    if (!clean.length) return 0;
+    const next = { ...data };
+    clean.forEach((r) => {
+      const cur = next[r.date] || { budget: 0, items: [] };
+      next[r.date] = { ...cur, items: [...(cur.items || []), { cat: CAT_BY_ID[r.cat] ? r.cat : "other", amount: numOf(r.amount), pay: r.pay === "cash" ? "cash" : r.pay }] };
+    });
+    persist(next);
+    persistMeta({ ...meta, lastPay: clean[clean.length - 1].pay });
+    setTable(false);
+    return clean.length;
+  };
+
+  // bulk budget: weekday/weekend cash+card across the displayed period
+  const applyBulkBudget = (wdCash, wdCard, weCash, weCard, skipExisting) => {
+    const next = { ...data };
+    let n = 0;
+    period.keys.forEach((k) => {
+      const [y, m, d] = k.split("-").map(Number);
+      const dow = new Date(y, m - 1, d).getDay();
+      const isWE = dow === 0 || dow === 6;
+      const bc = isWE ? weCash : wdCash, bd = isWE ? weCard : wdCard;
+      const bt = bc + bd;
+      if (bt <= 0) return;
+      const cur = next[k];
+      if (skipExisting && cur && (numOf(cur.budget) > 0)) return;
+      next[k] = { ...(cur || { items: [] }), budget: bt, budgetCash: bc, budgetCard: bd, items: (cur && cur.items) || [] };
+      n++;
+    });
+    persist(next);
+    setBulk(false);
+    return n;
+  };
 
   // recent items (latest first, deduped by cat+amount+pay, max 6)
   const recentItems = useMemo(() => {
@@ -356,7 +394,11 @@ function BudgetCalendar() {
         {tab === "cal" && (
           <>
             <BudgetRemaining totals={totals} period={period} today={today} />
-            <button onClick={() => setQuick(true)} style={{ width: "100%", marginBottom: 14, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, boxShadow: "0 2px 6px rgba(200,85,61,.25)" }}>＋ すぐ追加(今日・複数日まとめて)</button>
+            <button onClick={() => setQuick(true)} style={{ width: "100%", marginBottom: 8, padding: "13px 0", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, boxShadow: "0 2px 6px rgba(200,85,61,.25)" }}>＋ すぐ追加(今日・複数日まとめて)</button>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <button onClick={() => setTable(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 13, border: `1px solid ${C.line}`, background: C.surface, color: C.budgetInk, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>📋 表で一括入力</button>
+              <button onClick={() => setBulk(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 13, border: `1px solid ${C.line}`, background: C.surface, color: C.budgetInk, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>📅 予算まとめて設定</button>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 4 }}>
               {WEEK.map((w, i) => (<div key={w} style={{ textAlign: "center", fontSize: 11, padding: "6px 0", fontWeight: 600, color: i === 0 ? C.seal : i === 6 ? C.budgetInk : C.muted }}>{w}</div>))}
             </div>
@@ -372,6 +414,8 @@ function BudgetCalendar() {
 
       {sel && (<Editor key={sel} dateKey={sel} entry={data[sel]} cards={meta.cards || []} recent={recentItems} lastPay={meta.lastPay || "cash"} onSave={saveDay} onClear={() => clearDay(sel)} onClose={() => setSel(null)} hasData={hasEntry(data[sel])} />)}
       {quick && (<QuickAdd dateKey={todayKey} cards={meta.cards || []} recent={recentItems} presets={meta.presets || []} lastPay={meta.lastPay || "cash"} onAdd={(dk, items) => addItemsToDay(dk, items)} onPresets={(list) => persistMeta({ ...meta, presets: list })} onClose={() => setQuick(false)} />)}
+      {bulk && (<BulkBudget period={period} data={data} onApply={applyBulkBudget} onClose={() => setBulk(false)} />)}
+      {table && (<BatchTable todayKey={todayKey} cards={meta.cards || []} lastPay={meta.lastPay || "cash"} onApply={addItemsBatch} onClose={() => setTable(false)} />)}
       {showExport && <ExportSheet csv={buildCSV()} backup={buildBackup()} onRestore={restoreBackup} onClose={() => setShowExport(false)} />}
     </div>
   );
@@ -541,6 +585,119 @@ function Editor({ dateKey, entry, cards, prefill, recent, lastPay, onSave, onCle
         <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
           {hasData && (<button onClick={onClear} style={{ padding: "13px 16px", borderRadius: 13, border: `1px solid ${C.line}`, background: "transparent", color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>この日を削除</button>)}
           <button onClick={() => onSave(dateKey, cashBudget, cardBudget, items)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchTable({ todayKey, cards, lastPay, onApply, onClose }) {
+  const defPay = resolvePay(lastPay, cards);
+  const newRow = (date) => ({ id: uid(), date: date || todayKey, cat: "food", amount: "", pay: defPay });
+  const [rows, setRows] = useState(() => [newRow(), newRow(), newRow(), newRow(), newRow()]);
+  const set = (id, f, v) => setRows((arr) => arr.map((r) => (r.id === id ? { ...r, [f]: v } : r)));
+  const remove = (id) => setRows((arr) => (arr.length > 1 ? arr.filter((r) => r.id !== id) : arr));
+  const addRow = () => setRows((arr) => [...arr, newRow(arr.length ? arr[arr.length - 1].date : todayKey)]);
+  const valid = rows.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && numOf(r.amount) > 0);
+  const total = valid.reduce((s, r) => s + numOf(r.amount), 0);
+  const cellSel = { border: `1px solid ${C.line}`, borderRadius: 8, background: C.paper, appearance: "none", WebkitAppearance: "none", outline: "none", fontFamily: FONT, fontSize: 12, fontWeight: 600, color: C.ink, padding: "8px 4px", width: "100%", textAlign: "center" };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, maxHeight: "90vh", overflowY: "auto", background: C.paper, borderRadius: "22px 22px 0 0", padding: "10px 14px 26px", boxShadow: "0 -8px 30px rgba(44,39,31,.18)" }}>
+        <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>表で一括入力</div>
+        <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px", lineHeight: 1.6 }}>上から順に入力して、最後に「まとめて保存」。行の日付は直前の行から引き継がれます。金額が空の行は無視されます。</p>
+        <div style={{ display: "grid", gridTemplateColumns: "108px 1fr 72px 72px 22px", gap: 5, alignItems: "center", marginBottom: 6 }}>
+          {["日付", "金額", "カテゴリ", "支払い", ""].map((h, i) => (<div key={i} style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textAlign: i === 1 ? "left" : "center" }}>{h}</div>))}
+        </div>
+        {rows.map((r) => (
+          <div key={r.id} style={{ display: "grid", gridTemplateColumns: "108px 1fr 72px 72px 22px", gap: 5, alignItems: "center", marginBottom: 6 }}>
+            <input type="date" value={r.date} onChange={(e) => set(r.id, "date", e.target.value)} style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.paper, outline: "none", fontFamily: FONT, fontSize: 11.5, fontWeight: 600, color: C.ink, padding: "8px 2px", width: "100%", boxSizing: "border-box" }} />
+            <div style={{ display: "flex", alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 8, background: C.surface, padding: "0 7px" }}>
+              <span style={{ fontSize: 12, color: C.faint, marginRight: 1 }}>¥</span>
+              <input type="text" inputMode="numeric" value={r.amount} onChange={(e) => set(r.id, "amount", e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 14.5, fontWeight: 700, color: C.ink, padding: "8px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
+            </div>
+            <select value={r.cat} onChange={(e) => set(r.id, "cat", e.target.value)} style={cellSel}>
+              {CATS.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+            <select value={r.pay} onChange={(e) => set(r.id, "pay", e.target.value)} style={cellSel}>
+              <option value="cash">現金</option>
+              {cards.map((c) => <option key={c.id} value={c.id}>{c.name || "カード"}</option>)}
+            </select>
+            <button onClick={() => remove(r.id)} aria-label="この行を削除" style={{ width: 22, height: 28, border: "none", background: "transparent", color: C.faint, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
+          </div>
+        ))}
+        <button onClick={addRow} style={{ width: "100%", marginTop: 4, fontSize: 13, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "10px 0", cursor: "pointer", fontFamily: FONT }}>＋ 行を追加</button>
+        {valid.length > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, padding: "10px 14px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12 }}>
+            <span style={{ fontSize: 12.5, color: C.muted, fontWeight: 600 }}>{valid.length}件</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: C.ink, fontVariantNumeric: "tabular-nums" }}>合計 {yen(total)}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+          <button onClick={onClose} style={{ padding: "13px 18px", borderRadius: 13, border: `1px solid ${C.line}`, background: "transparent", color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>閉じる</button>
+          <button disabled={valid.length === 0} onClick={() => onApply(rows)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: valid.length === 0 ? C.line : C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: valid.length === 0 ? "default" : "pointer", fontFamily: FONT }}>{valid.length === 0 ? "まとめて保存" : `${valid.length}件をまとめて保存`}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkBudget({ period, data, onApply, onClose }) {
+  const [wdCash, setWdCash] = useState("");
+  const [wdCard, setWdCard] = useState("");
+  const [weCash, setWeCash] = useState("");
+  const [weCard, setWeCard] = useState("");
+  const [skip, setSkip] = useState(true);
+  // preview counts
+  let wdN = 0, weN = 0, skipN = 0;
+  period.keys.forEach((k) => {
+    const [y, m, d] = k.split("-").map(Number);
+    const dow = new Date(y, m - 1, d).getDay();
+    const isWE = dow === 0 || dow === 6;
+    const bt = isWE ? numOf(weCash) + numOf(weCard) : numOf(wdCash) + numOf(wdCard);
+    if (bt <= 0) return;
+    if (skip && data[k] && numOf(data[k].budget) > 0) { skipN++; return; }
+    if (isWE) weN++; else wdN++;
+  });
+  const wdTotal = numOf(wdCash) + numOf(wdCard), weTotal = numOf(weCash) + numOf(weCard);
+  const grandTotal = wdN * wdTotal + weN * weTotal;
+  const row = (label, color, cashV, setCashV, cardV, setCardV) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <label style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: 11, color: CASH_COLOR, fontWeight: 600 }}>現金予算</span>
+          <MoneyInput value={cashV} onChange={setCashV} color={CASH_COLOR} />
+        </label>
+        <label style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: 11, color: CARD_COLOR, fontWeight: 600 }}>カード予算</span>
+          <MoneyInput value={cardV} onChange={setCardV} color={CARD_COLOR} />
+        </label>
+      </div>
+    </div>
+  );
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, maxHeight: "88vh", overflowY: "auto", background: C.paper, borderRadius: "22px 22px 0 0", padding: "10px 18px 26px", boxShadow: "0 -8px 30px rgba(44,39,31,.18)" }}>
+        <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>予算をまとめて設定</div>
+        <p style={{ fontSize: 12, color: C.muted, margin: "0 0 16px", lineHeight: 1.6 }}>表示中の期間の全日に、平日/休日別の予算を一括で入れます。</p>
+        {row("平日(月〜金)", C.budgetInk, wdCash, setWdCash, wdCard, setWdCard)}
+        {row("休日(土・日)", C.seal, weCash, setWeCash, weCard, setWeCard)}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: C.muted, cursor: "pointer", marginBottom: 14 }}>
+          <input type="checkbox" checked={skip} onChange={(e) => setSkip(e.target.checked)} style={{ accentColor: C.seal }} />
+          すでに予算がある日は上書きしない{skipN > 0 ? `(${skipN}日そのまま)` : ""}
+        </label>
+        {(wdN + weN) > 0 && (
+          <div style={{ padding: "11px 14px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, marginBottom: 14, fontSize: 12.5, color: C.muted, lineHeight: 1.7 }}>
+            平日 {wdN}日 × {yen(wdTotal)} ＋ 休日 {weN}日 × {yen(weTotal)}<br />
+            <span style={{ fontWeight: 700, color: C.ink }}>期間の予算合計: {yen(grandTotal)}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ padding: "13px 18px", borderRadius: 13, border: `1px solid ${C.line}`, background: "transparent", color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>閉じる</button>
+          <button disabled={wdN + weN === 0} onClick={() => onApply(numOf(wdCash), numOf(wdCard), numOf(weCash), numOf(weCard), skip)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: wdN + weN === 0 ? C.line : C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: wdN + weN === 0 ? "default" : "pointer", fontFamily: FONT }}>{wdN + weN}日に設定する</button>
         </div>
       </div>
     </div>
