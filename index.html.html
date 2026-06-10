@@ -386,7 +386,7 @@ function BudgetCalendar() {
         <Summary totals={totals} />
 
         <div style={{ display: "flex", gap: 6, background: C.lineSoft, padding: 4, borderRadius: 12, marginBottom: 16 }}>
-          {[["cal", "カレンダー"], ["analysis", "分析"], ["funds", "資金"]].map(([id, label]) => (
+          {[["cal", "カレンダー"], ["analysis", "分析"], ["funds", "資金"], ["plan", "計画"]].map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: FONT, background: tab === id ? C.surface : "transparent", color: tab === id ? C.ink : C.muted, boxShadow: tab === id ? "0 1px 2px rgba(44,39,31,.08)" : "none" }}>{label}</button>
           ))}
         </div>
@@ -409,13 +409,14 @@ function BudgetCalendar() {
           </>
         )}
         {tab === "analysis" && <Analysis data={data} periodKeys={period.keys} />}
-        {tab === "funds" && <Funds data={data} view={view} meta={meta} onMeta={persistMeta} periodKeys={period.keys} />}
+        {tab === "funds" && <Funds mode="assets" data={data} view={view} meta={meta} onMeta={persistMeta} periodKeys={period.keys} />}
+        {tab === "plan" && <Funds mode="plan" data={data} view={view} meta={meta} onMeta={persistMeta} periodKeys={period.keys} />}
       </div>
 
       {sel && (<Editor key={sel} dateKey={sel} entry={data[sel]} cards={meta.cards || []} recent={recentItems} lastPay={meta.lastPay || "cash"} onSave={saveDay} onClear={() => clearDay(sel)} onClose={() => setSel(null)} hasData={hasEntry(data[sel])} />)}
       {quick && (<QuickAdd dateKey={todayKey} cards={meta.cards || []} recent={recentItems} presets={meta.presets || []} lastPay={meta.lastPay || "cash"} onAdd={(dk, items) => addItemsToDay(dk, items)} onPresets={(list) => persistMeta({ ...meta, presets: list })} onClose={() => setQuick(false)} />)}
       {bulk && (<BulkBudget period={period} data={data} onApply={applyBulkBudget} onClose={() => setBulk(false)} />)}
-      {table && (<BatchTable todayKey={todayKey} cards={meta.cards || []} lastPay={meta.lastPay || "cash"} onApply={addItemsBatch} onClose={() => setTable(false)} />)}
+      {table && (<BatchTable period={period} todayKey={todayKey} cards={meta.cards || []} lastPay={meta.lastPay || "cash"} onApply={addItemsBatch} onClose={() => setTable(false)} />)}
       {showExport && <ExportSheet csv={buildCSV()} backup={buildBackup()} onRestore={restoreBackup} onClose={() => setShowExport(false)} />}
     </div>
   );
@@ -591,42 +592,56 @@ function Editor({ dateKey, entry, cards, prefill, recent, lastPay, onSave, onCle
   );
 }
 
-function BatchTable({ todayKey, cards, lastPay, onApply, onClose }) {
+function BatchTable({ period, todayKey, cards, lastPay, onApply, onClose }) {
   const defPay = resolvePay(lastPay, cards);
   const newRow = (date) => ({ id: uid(), date: date || todayKey, cat: "food", amount: "", pay: defPay });
-  const [rows, setRows] = useState(() => [newRow(), newRow(), newRow(), newRow(), newRow()]);
+  const [rows, setRows] = useState(() => (period && period.keys && period.keys.length ? period.keys.map((k) => newRow(k)) : [newRow(), newRow(), newRow(), newRow(), newRow()]));
   const set = (id, f, v) => setRows((arr) => arr.map((r) => (r.id === id ? { ...r, [f]: v } : r)));
   const remove = (id) => setRows((arr) => (arr.length > 1 ? arr.filter((r) => r.id !== id) : arr));
+  const addRowAfter = (id) => setRows((arr) => { const i = arr.findIndex((r) => r.id === id); const copy = [...arr]; copy.splice(i + 1, 0, newRow(arr[i].date)); return copy; });
   const addRow = () => setRows((arr) => [...arr, newRow(arr.length ? arr[arr.length - 1].date : todayKey)]);
   const valid = rows.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && numOf(r.amount) > 0);
   const total = valid.reduce((s, r) => s + numOf(r.amount), 0);
+  const dowOf = (ds) => { const [y, m, d] = ds.split("-").map(Number); return new Date(y, m - 1, d).getDay(); };
+  const dowChar = ["日", "月", "火", "水", "木", "金", "土"];
   const cellSel = { border: `1px solid ${C.line}`, borderRadius: 8, background: C.paper, appearance: "none", WebkitAppearance: "none", outline: "none", fontFamily: FONT, fontSize: 12, fontWeight: 600, color: C.ink, padding: "8px 4px", width: "100%", textAlign: "center" };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(44,39,31,.32)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 460, maxHeight: "90vh", overflowY: "auto", background: C.paper, borderRadius: "22px 22px 0 0", padding: "10px 14px 26px", boxShadow: "0 -8px 30px rgba(44,39,31,.18)" }}>
         <div style={{ width: 38, height: 4, borderRadius: 2, background: C.line, margin: "0 auto 16px" }} />
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>表で一括入力</div>
-        <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px", lineHeight: 1.6 }}>上から順に入力して、最後に「まとめて保存」。行の日付は直前の行から引き継がれます。金額が空の行は無視されます。</p>
-        <div style={{ display: "grid", gridTemplateColumns: "108px 1fr 72px 72px 22px", gap: 5, alignItems: "center", marginBottom: 6 }}>
-          {["日付", "金額", "カテゴリ", "支払い", ""].map((h, i) => (<div key={i} style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textAlign: i === 1 ? "left" : "center" }}>{h}</div>))}
+        <p style={{ fontSize: 12, color: C.muted, margin: "0 0 12px", lineHeight: 1.6 }}>今月の1日分ずつ行が並んでいます。使った日に金額を入れて、最後に「まとめて保存」。金額が空の日は無視されます。「＋」で同じ日に行を増やせます。</p>
+        <div style={{ display: "grid", gridTemplateColumns: "86px 1fr 66px 66px 20px 20px", gap: 4, alignItems: "center", marginBottom: 6 }}>
+          {["日付", "金額", "カテゴリ", "支払い", "", ""].map((h, i) => (<div key={i} style={{ fontSize: 10.5, color: C.muted, fontWeight: 700, textAlign: i === 1 ? "left" : "center" }}>{h}</div>))}
         </div>
-        {rows.map((r) => (
-          <div key={r.id} style={{ display: "grid", gridTemplateColumns: "108px 1fr 72px 72px 22px", gap: 5, alignItems: "center", marginBottom: 6 }}>
-            <input type="date" value={r.date} onChange={(e) => set(r.id, "date", e.target.value)} style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.paper, outline: "none", fontFamily: FONT, fontSize: 11.5, fontWeight: 600, color: C.ink, padding: "8px 2px", width: "100%", boxSizing: "border-box" }} />
-            <div style={{ display: "flex", alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 8, background: C.surface, padding: "0 7px" }}>
-              <span style={{ fontSize: 12, color: C.faint, marginRight: 1 }}>¥</span>
-              <input type="text" inputMode="numeric" value={r.amount} onChange={(e) => set(r.id, "amount", e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 14.5, fontWeight: 700, color: C.ink, padding: "8px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
+        {rows.map((r) => {
+          const dw = /^\d{4}-\d{2}-\d{2}$/.test(r.date) ? dowOf(r.date) : -1;
+          const dcolor = dw === 0 ? C.seal : dw === 6 ? C.budgetInk : C.ink;
+          const isToday = r.date === todayKey;
+          return (
+            <div key={r.id} style={{ display: "grid", gridTemplateColumns: "86px 1fr 66px 66px 20px 20px", gap: 4, alignItems: "center", marginBottom: 5, background: isToday ? "rgba(200,85,61,0.06)" : "transparent", borderRadius: 8 }}>
+              <label style={{ position: "relative", display: "block" }}>
+                <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 3, border: `1px solid ${isToday ? C.seal : C.line}`, borderRadius: 8, background: C.paper, fontSize: 12, fontWeight: 700, color: dcolor, pointerEvents: "none" }}>
+                  {dw >= 0 ? `${Number(r.date.slice(8, 10))}日(${dowChar[dw]})` : "日付"}
+                </span>
+                <input type="date" value={r.date} onChange={(e) => set(r.id, "date", e.target.value)} style={{ border: "none", outline: "none", background: "transparent", fontFamily: FONT, fontSize: 11.5, color: "transparent", padding: "8px 2px", width: "100%", boxSizing: "border-box", opacity: 0.011 }} />
+              </label>
+              <div style={{ display: "flex", alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 8, background: C.surface, padding: "0 7px" }}>
+                <span style={{ fontSize: 12, color: C.faint, marginRight: 1 }}>¥</span>
+                <input type="text" inputMode="numeric" value={r.amount} onChange={(e) => set(r.id, "amount", e.target.value.replace(/[^0-9]/g, ""))} placeholder="—" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 14.5, fontWeight: 700, color: C.ink, padding: "8px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
+              </div>
+              <select value={r.cat} onChange={(e) => set(r.id, "cat", e.target.value)} style={cellSel}>
+                {CATS.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+              <select value={r.pay} onChange={(e) => set(r.id, "pay", e.target.value)} style={cellSel}>
+                <option value="cash">現金</option>
+                {cards.map((c) => <option key={c.id} value={c.id}>{c.name || "カード"}</option>)}
+              </select>
+              <button onClick={() => addRowAfter(r.id)} aria-label="同じ日に行を追加" style={{ width: 20, height: 28, border: "none", background: "transparent", color: C.budgetInk, fontSize: 15, fontWeight: 700, cursor: "pointer", lineHeight: 1, padding: 0 }}>＋</button>
+              <button onClick={() => remove(r.id)} aria-label="この行を削除" style={{ width: 20, height: 28, border: "none", background: "transparent", color: C.faint, fontSize: 15, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
             </div>
-            <select value={r.cat} onChange={(e) => set(r.id, "cat", e.target.value)} style={cellSel}>
-              {CATS.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-            </select>
-            <select value={r.pay} onChange={(e) => set(r.id, "pay", e.target.value)} style={cellSel}>
-              <option value="cash">現金</option>
-              {cards.map((c) => <option key={c.id} value={c.id}>{c.name || "カード"}</option>)}
-            </select>
-            <button onClick={() => remove(r.id)} aria-label="この行を削除" style={{ width: 22, height: 28, border: "none", background: "transparent", color: C.faint, fontSize: 16, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
-          </div>
-        ))}
+          );
+        })}
         <button onClick={addRow} style={{ width: "100%", marginTop: 4, fontSize: 13, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "10px 0", cursor: "pointer", fontFamily: FONT }}>＋ 行を追加</button>
         {valid.length > 0 && (
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, padding: "10px 14px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12 }}>
@@ -634,8 +649,8 @@ function BatchTable({ todayKey, cards, lastPay, onApply, onClose }) {
             <span style={{ fontSize: 16, fontWeight: 700, color: C.ink, fontVariantNumeric: "tabular-nums" }}>合計 {yen(total)}</span>
           </div>
         )}
-        <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
-          <button onClick={onClose} style={{ padding: "13px 18px", borderRadius: 13, border: `1px solid ${C.line}`, background: "transparent", color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>閉じる</button>
+        <div style={{ display: "flex", gap: 10, marginTop: 14, position: "sticky", bottom: 0, background: C.paper, paddingTop: 6 }}>
+          <button onClick={onClose} style={{ padding: "13px 18px", borderRadius: 13, border: `1px solid ${C.line}`, background: C.paper, color: C.muted, fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>閉じる</button>
           <button disabled={valid.length === 0} onClick={() => onApply(rows)} style={{ flex: 1, padding: "13px 16px", borderRadius: 13, border: "none", background: valid.length === 0 ? C.line : C.seal, color: "#fff", fontSize: 15, fontWeight: 700, cursor: valid.length === 0 ? "default" : "pointer", fontFamily: FONT }}>{valid.length === 0 ? "まとめて保存" : `${valid.length}件をまとめて保存`}</button>
         </div>
       </div>
@@ -1032,7 +1047,9 @@ function CardsEditor({ cards, banks, auto, fixMap, onCards, onFix }) {
   );
 }
 
-function Funds({ data, view, meta, onMeta, periodKeys }) {
+function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
+  const P = mode !== "assets"; // 計画タブの内容
+  const A = mode !== "plan"; // 資金タブの内容
   const mk = mkey(view);
   const banks = meta.banks || [];
   const cards = meta.cards || [];
@@ -1085,6 +1102,7 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
 
   return (
     <div>
+      {P && (<>
       <SectionTitle note="給料日などに合わせて集計の開始日を選べます。カレンダーもこの期間で表示されます。">期間の設定</SectionTitle>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 28, padding: "12px 14px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 13 }}>
         <span style={{ fontSize: 13, color: C.ink, fontWeight: 600 }}>締め日(サイクル開始日)</span>
@@ -1095,7 +1113,9 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
           <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
         </div>
       </div>
+      </>)}
 
+      {A && (<>
       <SectionTitle note="口座・カードは複数登録できます。カード利用は記録から自動集計、確定額を入れるとそちらを優先します。">口座とカード</SectionTitle>
 
       <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>銀行口座(残高)</div>
@@ -1139,7 +1159,9 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
           <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, fontVariantNumeric: "tabular-nums" }}>{yen(autoCardTotal)}</div>
         </div>
       </div>
+      </>)}
 
+      {P && (<>
       <SectionTitle note="まず収入の使いみち(資金使途)を決めて、残りから支出予算を立てる流れです。">収入と資金使途</SectionTitle>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -1176,7 +1198,7 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
               </div>
             </div>
           ))}
-          <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>積立は資金使途に含まれ、下の貯蓄枠の残高に自動で加算されます。</div>
+          <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>積立は資金使途に含まれ、「資金」タブの貯蓄枠の残高に自動で加算されます。</div>
         </div>
       )}
 
@@ -1208,9 +1230,11 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
       <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
       <SectionTitle note="家賃やサブスクなど毎月決まった支出を登録すると、毎月その日に自動でカレンダーへ記録されます。">固定費(毎月自動で記録)</SectionTitle>
       <FixedEditor items={meta.fixed || []} cards={cards} onChange={(list) => onMeta({ ...meta, fixed: list })} />
+      </>)}
 
+      {A && (<>
       <div style={{ height: 1, background: C.lineSoft, margin: "30px 0 18px" }} />
-      <SectionTitle note="用途ごとに貯める枠です。上の「③積立」で入れた額が自動で加算されます。">用途別の貯蓄枠</SectionTitle>
+      <SectionTitle note="用途ごとに貯める枠です。「計画」タブの③積立で入れた額が自動で加算されます。">用途別の貯蓄枠</SectionTitle>
       <SavingsEditor items={savings} contrib={Object.fromEntries(savings.map((sv) => [sv.id, contribOf(meta, sv.id)]))} onChange={setSavings} />
       {savings.length > 0 && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, padding: "10px 14px", background: C.goodSoft, borderRadius: 12 }}>
@@ -1218,6 +1242,7 @@ function Funds({ data, view, meta, onMeta, periodKeys }) {
           <span style={{ fontSize: 18, fontWeight: 700, color: C.good, fontVariantNumeric: "tabular-nums" }}>{yen(totalSaved)}</span>
         </div>
       )}
+      </>)}
     </div>
   );
 }
