@@ -105,6 +105,33 @@ const monthSplit = (data, keys) => {
   });
   return { cash, card };
 };
+// usage of one card within its own billing cycle ending on `closeDay`, that covers `ref` date.
+// returns the total for the cycle whose END (closeDay) is the first closeDay on/after ref's cycle.
+function cardCycleUsage(data, card, closeDay, ref) {
+  // closeDay 1-28, or 0/undefined => month-end
+  const y = ref.getFullYear(), m = ref.getMonth(), d = ref.getDate();
+  const lastDay = (yy, mm) => new Date(yy, mm + 1, 0).getDate();
+  const closeOf = (yy, mm) => (closeDay >= 1 && closeDay <= 28 ? closeDay : lastDay(yy, mm));
+  // cycle that contains ref: ends on the first close date >= ref
+  let endY = y, endM = m;
+  if (d > closeOf(y, m)) { endM = m + 1; if (endM > 11) { endM = 0; endY++; } }
+  const endDay = closeOf(endY, endM);
+  // start = day after previous close
+  let startY = endY, startM = endM - 1; if (startM < 0) { startM = 11; startY--; }
+  const startDay = closeOf(startY, startM) + 1;
+  const start = new Date(startY, startM, startDay);
+  const end = new Date(endY, endM, endDay);
+  let total = 0;
+  Object.keys(data).forEach((k) => {
+    const e = data[k]; if (!e || !Array.isArray(e.items)) return;
+    const [ky, km, kd] = k.split("-").map(Number);
+    const dt = new Date(ky, km - 1, kd);
+    if (dt < start || dt > end) return;
+    e.items.forEach((it) => { if (it.amount && it.pay === card.id) total += it.amount; });
+  });
+  return { total, start, end };
+}
+
 const monthByCard = (data, keys, cards) => {
   const res = {};
   cards.forEach((c) => (res[c.id] = 0));
@@ -1003,7 +1030,9 @@ function EditList({ items, onChange, namePlaceholder }) {
   );
 }
 
-function CardsEditor({ cards, banks, auto, fixMap, onCards, onFix }) {
+function CardsEditor({ cards, banks, auto, fixMap, data, onCards, onFix }) {
+  const now = new Date();
+  const mdShort = (dt) => `${dt.getMonth() + 1}/${dt.getDate()}`;
   const rename = (id, name) => onCards(cards.map((c) => (c.id === id ? { ...c, name } : c)));
   const setBank = (id, bankId) => onCards(cards.map((c) => (c.id === id ? { ...c, bankId } : c)));
   const setField = (id, f, v) => onCards(cards.map((c) => (c.id === id ? { ...c, [f]: v } : c)));
@@ -1018,17 +1047,32 @@ function CardsEditor({ cards, banks, auto, fixMap, onCards, onFix }) {
             <input type="text" value={c.name} onChange={(e) => rename(c.id, e.target.value)} placeholder="例: ◯◯カード" style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 600, color: C.ink, fontFamily: FONT }} />
             <button onClick={() => remove(c.id)} aria-label="このカードを削除" style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 8, border: "none", background: "transparent", color: C.faint, fontSize: 18, cursor: "pointer", lineHeight: 1 }}>×</button>
           </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 10.5, color: C.muted }}>記録(当月)</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, fontVariantNumeric: "tabular-nums" }}>{yen(auto[c.id] || 0)}</div>
-            </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 10 }}>
             <div style={{ flex: 1.2 }}>
+              {(() => {
+                const cur = cardCycleUsage(data, c, c.closeDay || 0, now);
+                return (<>
+                  <div style={{ fontSize: 10.5, color: C.muted }}>今回の締め期間の利用 <span style={{ color: C.faint }}>({mdShort(cur.start)}〜{mdShort(cur.end)})</span></div>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: CARD_COLOR, fontVariantNumeric: "tabular-nums" }}>{yen(cur.total)}</div>
+                </>);
+              })()}
+            </div>
+            <div style={{ flex: 1 }}>
               <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>確定請求額(任意)</div>
               <div style={{ display: "flex", alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper, padding: "0 8px" }}>
                 <span style={{ fontSize: 13, color: C.faint, marginRight: 2 }}>¥</span>
                 <input type="text" inputMode="numeric" value={fixMap[c.id] || ""} onChange={(e) => onFix(c.id, e.target.value.replace(/[^0-9]/g, ""))} placeholder="—" style={{ width: "100%", minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 15, fontWeight: 700, color: CARD_COLOR, padding: "8px 0", fontVariantNumeric: "tabular-nums", fontFamily: FONT }} />
               </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>締め日</div>
+            <div style={{ position: "relative", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper }}>
+              <select value={c.closeDay || ""} onChange={(e) => setField(c.id, "closeDay", e.target.value ? Number(e.target.value) : "")} style={{ width: "100%", border: "none", outline: "none", background: "transparent", appearance: "none", WebkitAppearance: "none", padding: "9px 28px 9px 10px", fontSize: 13.5, fontWeight: 600, color: c.closeDay ? C.ink : C.faint, fontFamily: FONT, cursor: "pointer" }}>
+                <option value="">月末締め</option>
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}日締め</option>)}
+              </select>
+              <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
             </div>
           </div>
           <div style={{ marginTop: 10 }}>
@@ -1170,7 +1214,7 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
       </div>
 
       <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>クレジットカード</div>
-      <CardsEditor cards={cards} banks={banks} auto={auto} fixMap={fixMap} onCards={setCards} onFix={setFix} />
+      <CardsEditor cards={cards} banks={banks} auto={auto} fixMap={fixMap} data={data} onCards={setCards} onFix={setFix} />
 
       <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 16, marginBottom: 12 }}>
         <Row label="口座合計" value={yen(totalBank)} color={C.ink} />
