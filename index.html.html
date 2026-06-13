@@ -1031,8 +1031,8 @@ function EditList({ items, onChange, namePlaceholder }) {
   );
 }
 
-function CardsEditor({ cards, banks, auto, fixMap, data, onCards, onFix }) {
-  const now = new Date();
+function CardsEditor({ cards, banks, auto, fixMap, data, viewRef, onCards, onFix }) {
+  const ref = (() => { if (viewRef && /^\d{4}-\d{2}-\d{2}$/.test(viewRef)) { const [y, m, d] = viewRef.split("-").map(Number); return new Date(y, m - 1, d); } return new Date(); })();
   const mdShort = (dt) => `${dt.getMonth() + 1}/${dt.getDate()}`;
   const rename = (id, name) => onCards(cards.map((c) => (c.id === id ? { ...c, name } : c)));
   const setBank = (id, bankId) => onCards(cards.map((c) => (c.id === id ? { ...c, bankId } : c)));
@@ -1051,9 +1051,9 @@ function CardsEditor({ cards, banks, auto, fixMap, data, onCards, onFix }) {
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 10 }}>
             <div style={{ flex: 1.2 }}>
               {(() => {
-                const cur = cardCycleUsage(data, c, c.closeDay || 0, now);
+                const cur = cardCycleUsage(data, c, c.closeDay || 0, ref);
                 return (<>
-                  <div style={{ fontSize: 10.5, color: C.muted }}>今回の締め期間の利用 <span style={{ color: C.faint }}>({mdShort(cur.start)}〜{mdShort(cur.end)})</span></div>
+                  <div style={{ fontSize: 10.5, color: C.muted }}>この月の締め期間の利用 <span style={{ color: C.faint }}>({mdShort(cur.start)}〜{mdShort(cur.end)})</span></div>
                   <div style={{ fontSize: 17, fontWeight: 700, color: CARD_COLOR, fontVariantNumeric: "tabular-nums" }}>{yen(cur.total)}</div>
                 </>);
               })()}
@@ -1218,7 +1218,7 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
       </div>
 
       <div style={{ fontSize: 12, color: C.muted, fontWeight: 600, marginBottom: 8 }}>クレジットカード</div>
-      <CardsEditor cards={cards} banks={banks} auto={auto} fixMap={fixMap} data={data} onCards={setCards} onFix={setFix} />
+      <CardsEditor cards={cards} banks={banks} auto={auto} fixMap={fixMap} data={data} viewRef={periodKeys[periodKeys.length - 1] || tkey} onCards={setCards} onFix={setFix} />
 
       <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 16, marginBottom: 12 }}>
         <Row label="口座合計" value={yen(totalBank)} color={C.ink} />
