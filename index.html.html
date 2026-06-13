@@ -110,8 +110,9 @@ const monthSplit = (data, keys) => {
 function cardCycleUsage(data, card, closeDay, ref) {
   // closeDay 1-28, or 0/undefined => month-end
   const y = ref.getFullYear(), m = ref.getMonth(), d = ref.getDate();
+  const cd = Number(closeDay) || 0;
   const lastDay = (yy, mm) => new Date(yy, mm + 1, 0).getDate();
-  const closeOf = (yy, mm) => (closeDay >= 1 && closeDay <= 28 ? closeDay : lastDay(yy, mm));
+  const closeOf = (yy, mm) => (cd >= 1 && cd <= 28 ? cd : lastDay(yy, mm));
   // cycle that contains ref: ends on the first close date >= ref
   let endY = y, endM = m;
   if (d > closeOf(y, m)) { endM = m + 1; if (endM > 11) { endM = 0; endY++; } }
@@ -1131,10 +1132,13 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
   const today = new Date();
   const tkey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
   const prevAuto = monthByCard(data, periodInfo(prevView(view), cs).keys, cards);
-  // amount that will be withdrawn for a card in the displayed period
+  // amount used on a card that should reduce the account balance now
   const cardRelevant = (c) => {
-    if (c.payDay) return c.payFrom === "prev" ? (prevAuto[c.id] || 0) : ((fixMap[c.id] !== undefined && fixMap[c.id] !== "") ? numOf(fixMap[c.id]) : (auto[c.id] || 0));
-    const f = fixMap[c.id]; return f !== undefined && f !== "" ? numOf(f) : (auto[c.id] || 0);
+    const f = fixMap[c.id];
+    if (f !== undefined && f !== "") return numOf(f);                         // 確定請求額を最優先
+    if (c.closeDay) return cardCycleUsage(data, c, c.closeDay, today).total;  // 締め期間の利用
+    if (c.payDay && c.payFrom === "prev") return prevAuto[c.id] || 0;         // 前月利用
+    return auto[c.id] || 0;                                                   // 当月(表示期間)の利用
   };
   // has this card's withdrawal date passed (relative to today)?
   const cardDone = (c) => {
@@ -1218,18 +1222,15 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
 
       <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 16, marginBottom: 12 }}>
         <Row label="口座合計" value={yen(totalBank)} color={C.ink} />
-        {drawnDone > 0 && <Row label="カード引き落とし済み" value={`− ${yen(drawnDone)}`} color={CARD_COLOR} />}
+        <Row label="カード利用(合計)" value={`− ${yen(usedCardTotal)}`} color={CARD_COLOR} />
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>今の残り</div><div style={{ fontSize: 10.5, color: C.faint }}>引き落とし済みを反映</div></div>
-          <span style={{ fontSize: 22, fontWeight: 700, color: realDone < 0 ? C.over : C.ink, fontVariantNumeric: "tabular-nums" }}>{yen(realDone)}</span>
+          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>実質残高</div><div style={{ fontSize: 10.5, color: C.faint }}>カード利用を引いた後の目安</div></div>
+          <span style={{ fontSize: 22, fontWeight: 700, color: negative ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{yen(real)}</span>
         </div>
-        {drawnPending > 0 && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.line}` }}>
-            <Row label="引き落とし予定(これから)" value={`− ${yen(drawnPending)}`} color={CARD_COLOR} />
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
-              <div><div style={{ fontSize: 13, fontWeight: 700, color: C.muted }}>実質残高</div><div style={{ fontSize: 10.5, color: C.faint }}>予定もすべて引いた後</div></div>
-              <span style={{ fontSize: 17, fontWeight: 700, color: negative ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{yen(real)}</span>
-            </div>
+        {drawnDone > 0 && (
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.line}`, fontSize: 11.5, color: C.muted, lineHeight: 1.6 }}>
+            うち<span style={{ color: CARD_COLOR, fontWeight: 700 }}>引き落とし済み {yen(drawnDone)}</span>(口座から出た分)/ 引き落とし予定 {yen(drawnPending)}<br />
+            引き落とし済みだけ反映した今の残り: <span style={{ fontWeight: 700, color: C.ink }}>{yen(realDone)}</span>
           </div>
         )}
         {(bankRows.some((b) => b.cardSum > 0) || (unlinkedCardSum > 0 && bankRows.length > 1)) && (
