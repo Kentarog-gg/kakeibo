@@ -1086,29 +1086,17 @@ function CardsEditor({ cards, banks, auto, fixMap, data, viewRef, onCards, onFix
               <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>引き落とし日</div>
-              <div style={{ position: "relative", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper }}>
-                <select value={c.payDay || ""} onChange={(e) => setField(c.id, "payDay", e.target.value ? Number(e.target.value) : "")} style={{ width: "100%", border: "none", outline: "none", background: "transparent", appearance: "none", WebkitAppearance: "none", padding: "9px 28px 9px 10px", fontSize: 13.5, fontWeight: 600, color: c.payDay ? C.ink : C.faint, fontFamily: FONT, cursor: "pointer" }}>
-                  <option value="">未設定</option>
-                  {Array.from({ length: 28 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}日</option>)}
-                </select>
-                <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
-              </div>
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>引き落とし対象</div>
-              <div style={{ position: "relative", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper }}>
-                <select value={c.payFrom || "this"} onChange={(e) => setField(c.id, "payFrom", e.target.value)} style={{ width: "100%", border: "none", outline: "none", background: "transparent", appearance: "none", WebkitAppearance: "none", padding: "9px 28px 9px 10px", fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: FONT, cursor: "pointer" }}>
-                  <option value="this">当月の利用</option>
-                  <option value="prev">前月の利用</option>
-                </select>
-                <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
-              </div>
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 3 }}>引き落とし日</div>
+            <div style={{ position: "relative", border: `1px solid ${C.line}`, borderRadius: 10, background: C.paper }}>
+              <select value={c.payDay || ""} onChange={(e) => setField(c.id, "payDay", e.target.value ? Number(e.target.value) : "")} style={{ width: "100%", border: "none", outline: "none", background: "transparent", appearance: "none", WebkitAppearance: "none", padding: "9px 28px 9px 10px", fontSize: 13.5, fontWeight: 600, color: c.payDay ? C.ink : C.faint, fontFamily: FONT, cursor: "pointer" }}>
+                <option value="">未設定</option>
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}日</option>)}
+              </select>
+              <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: C.faint, fontSize: 10, pointerEvents: "none" }}>▼</span>
             </div>
           </div>
-          {c.payDay ? <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>毎月{c.payDay}日に{c.payFrom === "prev" ? "前月" : "当月"}の利用分を引き落とし。その日を過ぎると残高から自動で差し引きます。</div> : null}
+          <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6, lineHeight: 1.6 }}>{c.closeDay ? `${c.closeDay}日締め` : "月末締め"}・前月の締め分を{c.payDay ? `毎月${c.payDay}日に` : ""}引き落とし。{c.payDay ? "その日を過ぎると残高から差し引きます。" : "引き落とし日を入れると、その日以降に残高へ反映します。"}</div>
         </div>
       ))}
       <button onClick={add} style={{ fontSize: 13, fontWeight: 600, color: C.budgetInk, background: "transparent", border: `1px dashed ${C.line}`, borderRadius: 11, padding: "10px 0", width: "100%", cursor: "pointer", fontFamily: FONT }}>＋ カードを追加</button>
@@ -1131,26 +1119,23 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
   const autoCardTotal = cards.reduce((s, c) => s + (auto[c.id] || 0), 0);
   const today = new Date();
   const tkey = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
-  const prevAuto = monthByCard(data, periodInfo(prevView(view), cs).keys, cards);
-  // amount used on a card that should reduce the account balance now
-  const cardRelevant = (c) => {
+  // 今月の引き落とし額 = 直前に締まったサイクル(=前月利用分)の利用額
+  const cardBill = (c) => {
     const f = fixMap[c.id];
-    if (f !== undefined && f !== "") return numOf(f);                         // 確定請求額を最優先
-    if (c.closeDay) return cardCycleUsage(data, c, c.closeDay, today).total;  // 締め期間の利用
-    if (c.payDay && c.payFrom === "prev") return prevAuto[c.id] || 0;         // 前月利用
-    return auto[c.id] || 0;                                                   // 当月(表示期間)の利用
+    if (f !== undefined && f !== "") return numOf(f);                 // 確定請求額を最優先
+    const cur = cardCycleUsage(data, c, c.closeDay || 0, today);      // 今まさに進行中のサイクル
+    const prevRef = new Date(cur.start.getFullYear(), cur.start.getMonth(), cur.start.getDate() - 1);
+    return cardCycleUsage(data, c, c.closeDay || 0, prevRef).total;   // その1つ前=今月引き落とし分
   };
-  // has this card's withdrawal date passed (relative to today)?
-  const cardDone = (c) => {
-    if (!c.payDay) return false;
-    let wk = null;
-    for (const k of periodKeys) { if (Number(k.slice(8, 10)) === Number(c.payDay)) { wk = k; break; } }
-    if (!wk) wk = periodKeys[periodKeys.length - 1] || tkey;
-    return tkey >= wk;
-  };
-  const usedCardTotal = cards.reduce((s, c) => s + cardRelevant(c), 0);
-  const drawnDone = cards.reduce((s, c) => s + (cardDone(c) ? cardRelevant(c) : 0), 0);
+  // 進行中サイクルの利用(まだ引き落とされない、次月の請求になる分)
+  const cardCurrent = (c) => cardCycleUsage(data, c, c.closeDay || 0, today).total;
+  // 引き落とし日を過ぎたか(今月基準)
+  const cardDone = (c) => (c.payDay ? today.getDate() >= Number(c.payDay) : false);
+  const usedCardTotal = cards.reduce((s, c) => s + cardBill(c), 0);
+  const currentCycleTotal = cards.reduce((s, c) => s + cardCurrent(c), 0);
+  const drawnDone = cards.reduce((s, c) => s + (cardDone(c) ? cardBill(c) : 0), 0);
   const drawnPending = usedCardTotal - drawnDone;
+  const cardRelevant = cardBill;
   const real = totalBank - usedCardTotal;
   const realDone = totalBank - drawnDone;
   const negative = real < 0;
@@ -1222,14 +1207,17 @@ function Funds({ data, view, meta, onMeta, periodKeys, mode }) {
 
       <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, marginTop: 16, marginBottom: 12 }}>
         <Row label="口座合計" value={yen(totalBank)} color={C.ink} />
-        <Row label="カード利用(合計)" value={`− ${yen(usedCardTotal)}`} color={CARD_COLOR} />
+        <Row label="今月の引き落とし(前月利用分)" value={`− ${yen(usedCardTotal)}`} color={CARD_COLOR} />
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>実質残高</div><div style={{ fontSize: 10.5, color: C.faint }}>カード利用を引いた後の目安</div></div>
+          <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>実質残高</div><div style={{ fontSize: 10.5, color: C.faint }}>今月の引き落としを引いた後</div></div>
           <span style={{ fontSize: 22, fontWeight: 700, color: negative ? C.over : C.good, fontVariantNumeric: "tabular-nums" }}>{yen(real)}</span>
         </div>
+        {currentCycleTotal > 0 && (
+          <div style={{ marginTop: 10, fontSize: 11, color: C.faint, lineHeight: 1.6 }}>進行中サイクルの利用 {yen(currentCycleTotal)}(来月以降の引き落とし予定)</div>
+        )}
         {drawnDone > 0 && (
-          <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.line}`, fontSize: 11.5, color: C.muted, lineHeight: 1.6 }}>
-            うち<span style={{ color: CARD_COLOR, fontWeight: 700 }}>引き落とし済み {yen(drawnDone)}</span>(口座から出た分)/ 引き落とし予定 {yen(drawnPending)}<br />
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.line}`, fontSize: 11.5, color: C.muted, lineHeight: 1.6 }}>
+            <span style={{ color: CARD_COLOR, fontWeight: 700 }}>引き落とし済み {yen(drawnDone)}</span> / 予定 {yen(drawnPending)}<br />
             引き落とし済みだけ反映した今の残り: <span style={{ fontWeight: 700, color: C.ink }}>{yen(realDone)}</span>
           </div>
         )}
