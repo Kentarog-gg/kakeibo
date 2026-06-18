@@ -5,13 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <title>家計簿カレンダー</title>
-<style>html,body{margin:0;padding:0;background:#FBF8F1;}#root{min-height:100vh;}</style>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#FBF8F1;}#root{min-height:100vh;}#err{display:none;white-space:pre-wrap;padding:16px;margin:12px;border-radius:10px;background:#fff;color:#C8553D;font-family:ui-monospace,monospace;font-size:12px;line-height:1.5;border:1px solid #eadfce;}</style>
+<script>
+function showErr(t){var d=document.getElementById('err');if(d){d.style.display='block';d.textContent=t;}var r=document.getElementById('loading');if(r)r.style.display='none';}
+window.addEventListener('error',function(e){showErr('読み込みエラー: '+(e.message||(e.error&&e.error.message)||'unknown')+(e.filename?('
+'+e.filename+':'+(e.lineno||'')):''));});
+window.addEventListener('unhandledrejection',function(e){showErr('通信エラー: '+(e.reason&&(e.reason.message||e.reason)));});
+setTimeout(function(){if(typeof Babel==='undefined'){showErr('変換ツール(Babel)を読み込めませんでした。電波の良い場所でリロードしてください。');}},8000);
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin></script>
 </head>
 <body>
-<div id="root"></div>
+<div id="root"><div id="loading" style="padding:48px 20px;text-align:center;color:#9A9081;font-family:-apple-system,sans-serif;font-size:14px">読み込み中…</div></div>
+<div id="err"></div>
 <script type="text/babel" data-presets="react">
 
 const { useState, useEffect, useMemo, useRef } = React;
@@ -1452,8 +1460,10 @@ function Welcome(){
   );
 }
 (async function(){
-  if(TOKEN){ await cloudLoad(); ReactDOM.createRoot(document.getElementById("root")).render(<BudgetCalendar />); }
-  else { ReactDOM.createRoot(document.getElementById("root")).render(<Welcome />); }
+  try {
+    if(TOKEN){ await cloudLoad(); ReactDOM.createRoot(document.getElementById("root")).render(<BudgetCalendar />); }
+    else { ReactDOM.createRoot(document.getElementById("root")).render(<Welcome />); }
+  } catch(e){ showErr("起動エラー: " + (e && e.message) + "\n" + (e && e.stack)); }
 })();
 
 </script>
